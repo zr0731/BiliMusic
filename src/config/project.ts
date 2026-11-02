@@ -1,5 +1,5 @@
 // Runtime links shared by the main process and renderer. Keep build.publish in sync.
-export const GITHUB_OWNER = 'Withnoidea'
+export const GITHUB_OWNER = 'zr0731'
 export const GITHUB_REPO = 'BiliMusic'
 export const PROJECT_REPOSITORY = `${GITHUB_OWNER}/${GITHUB_REPO}`
 export const PROJECT_URL = `https://github.com/${PROJECT_REPOSITORY}`

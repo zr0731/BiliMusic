@@ -142,7 +142,8 @@ const API_PATHS = new Set([
   '/x/web-interface/nav', '/x/web-interface/view', '/x/player/playurl',
   '/x/web-interface/search/type', '/x/web-interface/wbi/search/type', '/x/space/wbi/arc/search',
   '/x/web-interface/newlist', '/x/web-interface/popular', '/x/web-interface/index/top/rcmd', '/x/web-interface/ranking/region',
-  '/x/v3/fav/folder/created/list-all', '/x/v2/reply',
+  '/x/v3/fav/folder/created/list-all', '/x/v3/fav/resource/list', '/x/v2/reply',
+  '/x/polymer/web-space/seasons_archives_list', '/x/series/archives',
   '/x/centralization/interface/music/comprehensive/web/rank', '/x/centralization/interface/new/music',
 ])
 const authSession = () => session.fromPartition('persist:bili-auth')

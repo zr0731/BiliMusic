@@ -1,5 +1,5 @@
 import { useCoverColor } from '@/hooks/useCoverColor'
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import {
   Play,
@@ -13,16 +13,19 @@ import {
   Volume2,
   VolumeX,
   ListMusic,
-  Mic,
+  Captions,
+  RotateCcw,
   Music,
   Maximize2,
+  PictureInPicture,
 } from 'lucide-react'
-import { usePlayer, usePlayerProgress } from '@/contexts/PlayerContext'
+import { usePlayer, usePlayerProgress, usePlayerVolume } from '@/contexts/PlayerContext'
 import { useNowPlaying } from '@/contexts/NowPlayingContext'
 import { useAddToPlaylist } from '@/contexts/AddToPlaylistContext'
 import PlayQueue from '@/components/PlayQueue'
 import PlayerSlider from '@/components/PlayerSlider'
 import { loadDesktopLyricsSettings, saveDesktopLyricsSettings } from '@/hooks/useDesktopLyrics'
+import { loadVideoWindowEnabled, saveVideoWindowEnabled } from '@/hooks/useVideoWindow'
 
 const repeatLabels = { none: '顺序播放（播完停止）', all: '列表循环', one: '单曲循环' } as const
 
@@ -41,17 +44,28 @@ const sliderVars = {
 
 export default function PlayerBar() {
   const player = usePlayer()
+  const volumeState = usePlayerVolume()
   const { progress, duration, setProgress } = usePlayerProgress()
   const { open } = useNowPlaying()
   const { openAddToPlaylist } = useAddToPlaylist()
   const [queueOpen, setQueueOpen] = useState(false)
   const [desktopLyrics, setDesktopLyrics] = useState(loadDesktopLyricsSettings)
+  const [videoWindowOn, setVideoWindowOn] = useState(loadVideoWindowEnabled)
   useEffect(() => {
     const sync = () => setDesktopLyrics(loadDesktopLyricsSettings())
     window.addEventListener('DESKTOP_LYRICS_CHANGED_EVENT', sync)
     window.addEventListener('storage', sync)
     return () => {
       window.removeEventListener('DESKTOP_LYRICS_CHANGED_EVENT', sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
+  useEffect(() => {
+    const sync = () => setVideoWindowOn(loadVideoWindowEnabled())
+    window.addEventListener('VIDEO_WINDOW_CHANGED_EVENT', sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener('VIDEO_WINDOW_CHANGED_EVENT', sync)
       window.removeEventListener('storage', sync)
     }
   }, [])
@@ -91,7 +105,7 @@ export default function PlayerBar() {
       <div
         className="player-bar__track"
         style={{
-          width: 282,
+          width: 520,
           display: 'flex',
           alignItems: 'center',
           gap: 8,
@@ -146,8 +160,6 @@ export default function PlayerBar() {
             {player.currentTrack?.coverUrl ? (
               <>
                 <motion.img
-                  layoutId="np-cover"
-                  transition={{ type: 'spring', stiffness: 300, damping: 32 }}
                   src={player.currentTrack.coverUrl}
                   alt={player.currentTrack.title}
                   loading="eager"
@@ -186,37 +198,12 @@ export default function PlayerBar() {
             {player.playbackSource === 'local' && <span className="local-audio-badge">本地播放</span>}
             {player.currentTrack ? (
               <>
-                <motion.div
-                  layoutId="np-title"
-                  transition={{ type: 'spring', stiffness: 300, damping: 32 }}
-                  style={{
-                    color: 'var(--player-text)',
-                    fontSize: 14,
-                    fontWeight: 650,
-                    lineHeight: 1.2,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {player.currentTrack.title}
-                </motion.div>
-                <motion.div
-                  layoutId="np-artist"
-                  transition={{ type: 'spring', stiffness: 300, damping: 32 }}
-                  style={{
-                    marginTop: 4,
-                    color: 'var(--player-subtle-text)',
-                    fontSize: 12,
-                    fontWeight: 500,
-                    lineHeight: 1.2,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {player.currentTrack.artist}
-                </motion.div>
+                <div style={{ color: 'var(--player-text)', fontSize: 16, fontWeight: 650, lineHeight: 1.25, minWidth: 0 }}>
+                  <Marquee text={player.currentTrack.title} />
+                </div>
+                <div style={{ marginTop: 4, color: 'var(--player-subtle-text)', fontSize: 13, fontWeight: 500, lineHeight: 1.25, minWidth: 0 }}>
+                  <Marquee text={player.currentTrack.artist} />
+                </div>
               </>
             ) : (
               <>
@@ -272,7 +259,7 @@ export default function PlayerBar() {
         className="player-bar__transport"
         style={{
           flex: 1,
-          maxWidth: 620,
+          maxWidth: 560,
           minWidth: 280,
           display: 'flex',
           flexDirection: 'column',
@@ -357,7 +344,7 @@ export default function PlayerBar() {
       <div
         className="player-bar__tools"
         style={{
-          width: 282,
+          width: desktopLyrics.enabled ? 392 : 340,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'flex-end',
@@ -366,6 +353,17 @@ export default function PlayerBar() {
         }}
       >
         <IconButton
+          active={videoWindowOn}
+          ariaLabel={videoWindowOn ? '关闭小窗' : '打开小窗'}
+          onClick={() => {
+            if (!window.electronAPI?.videoWindow) { player.showToast('小窗仅在桌面客户端可用'); return }
+            saveVideoWindowEnabled(!videoWindowOn)
+          }}
+        >
+          <PictureInPicture size={18} />
+        </IconButton>
+
+        <IconButton
           active={desktopLyrics.enabled}
           ariaLabel={desktopLyrics.enabled ? '关闭桌面歌词' : '打开桌面歌词'}
           onClick={() => {
@@ -373,8 +371,16 @@ export default function PlayerBar() {
             saveDesktopLyricsSettings({ ...loadDesktopLyricsSettings(), enabled: !desktopLyrics.enabled })
           }}
         >
-          <Mic size={18} />
+          <Captions size={18} />
         </IconButton>
+        {desktopLyrics.enabled && (
+          <IconButton
+            ariaLabel="桌面歌词回到默认位置"
+            onClick={() => window.electronAPI?.desktopLyrics?.resetPosition?.()}
+          >
+            <RotateCcw size={18} />
+          </IconButton>
+        )}
 
         <IconButton
           active={queueOpen}
@@ -382,28 +388,6 @@ export default function PlayerBar() {
           onClick={() => setQueueOpen(o => !o)}
         >
           <ListMusic size={18} />
-          {player.queue.length > 0 && (
-            <span
-              style={{
-                position: 'absolute',
-                top: 4,
-                right: 2,
-                minWidth: 15,
-                height: 15,
-                padding: '0 3px',
-                borderRadius: 999,
-                background: '#ff375f',
-                color: '#fff',
-                border: '2px solid var(--color-background)',
-                fontSize: 9,
-                fontWeight: 800,
-                lineHeight: '11px',
-                textAlign: 'center',
-              }}
-            >
-              {player.queue.length}
-            </span>
-          )}
         </IconButton>
 
         <div
@@ -417,19 +401,19 @@ export default function PlayerBar() {
           } as CSSProperties}
         >
           <IconButton
-            ariaLabel={player.isMuted ? '取消静音' : '静音'}
-            onClick={() => player.setIsMuted(!player.isMuted)}
-            active={player.isMuted}
+            ariaLabel={volumeState.isMuted ? '取消静音' : '静音'}
+            onClick={() => volumeState.setIsMuted(!volumeState.isMuted)}
+            active={volumeState.isMuted}
           >
-            {player.isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+            {volumeState.isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
           </IconButton>
           <PlayerSlider
-            ariaLabel={`音量：${player.isMuted ? 0 : player.volume}%`}
-            value={player.isMuted ? 0 : player.volume}
+            ariaLabel={`音量：${volumeState.isMuted ? 0 : volumeState.volume}%`}
+            value={volumeState.isMuted ? 0 : volumeState.volume}
             max={100}
             onChange={(value) => {
-              player.setVolume(Math.round(value))
-              if (player.isMuted && value > 0) player.setIsMuted(false)
+              volumeState.setVolume(value)
+              if (volumeState.isMuted && value > 0) volumeState.setIsMuted(false)
             }}
             width={98}
             step={5}
@@ -569,6 +553,26 @@ function IconButton({
     >
       {children}
     </motion.button>
+  )
+}
+
+function Marquee({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [overflow, setOverflow] = useState(false)
+  useEffect(() => {
+    const node = ref.current
+    if (!node) return
+    const measure = () => setOverflow(node.scrollWidth > node.clientWidth + 2)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [text])
+  return (
+    <div ref={ref} className={`player-marquee${overflow ? ' is-overflow' : ''}`} style={overflow ? { ['--marquee-duration' as string]: `${((Math.max(4.2, Math.min(7.5, text.length * 0.09)) + 10) / 2).toFixed(1)}s` } : undefined}>
+      <span>{text}</span>
+      {overflow && <span aria-hidden="true">{text}</span>}
+    </div>
   )
 }
 

@@ -37,6 +37,12 @@ function detailHarness(initial) {
       return hooks[i].value
     },
     useCallback(fn, deps) { return react.useMemo(() => fn, deps) },
+    useRef(value) {
+      const i = cursor++
+      if (!hooks[i]) hooks[i] = { current: value }
+      return hooks[i]
+    },
+    memo(component) { return component },
     useEffect(fn, deps) {
       const i = cursor++
       if (depsChanged(hooks[i]?.deps, deps)) effects.push(() => {
@@ -48,7 +54,12 @@ function detailHarness(initial) {
   const notify = () => { for (const fn of listeners.get('changed') || []) fn() }
   const storage = {
     getPlaylist: () => playlist ? JSON.parse(JSON.stringify(playlist)) : null,
+    loadPlaylists: () => playlist ? [playlist] : [],
     PLAYLISTS_CHANGED_EVENT: 'changed',
+    PLAYLIST_UNDO_EVENT: 'undo',
+    playlistUndoCount: () => 0,
+    removeTracksFromPlaylist: () => playlist,
+    undoPlaylistAdd: () => playlist,
     deletePlaylist() { playlist = null; notify() },
   }
   const window = {
@@ -59,8 +70,13 @@ function detailHarness(initial) {
     react, 'react-router-dom': { useNavigate: () => (...args) => navigations.push(args) },
     '@/contexts/PlayerContext': { usePlayer: () => ({ showToast() {} }) },
     '@/contexts/ImportContext': { useImport: () => ({ records: {} }) },
-    '@/services/downloadManager': { isTrackDownloaded: () => false },
-    '@/components/AddToPlaylistButton': {}, '@/components/AppleMusicPage': {}, '@/utils/storage': storage,
+    '@/services/downloadManager': { isTrackDownloaded: () => false, downloadTracks: async () => ({ successCount: 0, failCount: 0 }), downloadSingleTrack: async () => ({}) },
+    '@/services/lyrics': { clearLyricCache() {} },
+    '@/components/AddToPlaylistButton': {},
+    '@/components/PlaylistBatchAdd': {},
+    '@/components/UnavailableTracks': { UnavailableCheckButton() { return null } },
+    '@/components/AppleMusicPage': {},
+    '@/utils/storage': storage,
   }, '\nexport { PlaylistDetail }', { window })
   function settle() {
     do {
@@ -86,7 +102,7 @@ test('missing, empty and externally deleted playlists settle without render loop
 test('build publisher and runtime URLs all belong to the fork', () => {
   const pkg = require('../package.json')
   assert.equal(`${pkg.build.publish[0].owner}/${pkg.build.publish[0].repo}`, project.PROJECT_REPOSITORY)
-  assert.equal(project.PROJECT_REPOSITORY, 'Withnoidea/BiliMusic')
+  assert.equal(project.PROJECT_REPOSITORY, 'zr0731/BiliMusic')
   assert.equal(pkg.homepage, project.PROJECT_URL)
   assert.equal(pkg.build.appId, 'com.hanversion.bilimusic', 'preserve app identity and user data')
   for (const file of ['electron/updater.ts', 'electron/otaUpdater.ts', 'src/pages/Settings.tsx']) {
@@ -121,7 +137,7 @@ test('OTA 404 is absent, invalid metadata/errors are not silently up-to-date', a
 })
 
 test('upstream OTA, stale fork bundles and path traversal never replace shipped renderer', () => {
-  for (const [namespace, version, file] of [['', '9.0.0', 'renderer-9.0.0.asar'], ['Withnoidea-BiliMusic', '1.0.3', 'renderer-1.0.3.asar'], ['Withnoidea-BiliMusic', '9.0.0', '../outside.asar']]) {
+  for (const [namespace, version, file] of [['', '9.0.0', 'renderer-9.0.0.asar'], ['zr0731-BiliMusic', '1.0.3', 'renderer-1.0.3.asar'], ['Withnoidea-BiliMusic', '9.0.0', '../outside.asar']]) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bilimusic-ota-migration-'))
     const otaDir = path.join(dir, 'ota', namespace)
     fs.mkdirSync(otaDir, { recursive: true })
@@ -146,7 +162,7 @@ test('valid newer fork renderer stages, promotes, verifies and survives next boo
   handlers.get('updater:apply-now')()
   ota.markRendererVerified()
   const reloaded = otaHarness(null, dir).ota
-  assert.equal(reloaded.getActiveRendererRoot(), path.join(dir, 'ota', 'Withnoidea-BiliMusic', manifest.file))
+  assert.equal(reloaded.getActiveRendererRoot(), path.join(dir, 'ota', 'zr0731-BiliMusic', manifest.file))
 })
 
 function updaterHarness({ fetch, manifest = null, packaged = false, rendererAvailable = false } = {}) {
@@ -171,7 +187,7 @@ test('fork without a Release reports unavailable; network error releases check l
   } })
   await h.updater.checkForUpdates(true)
   assert.equal(h.events.at(-1).type, 'unavailable')
-  assert.match(h.events.at(-1).message, /Withnoidea\/BiliMusic/)
+  assert.match(h.events.at(-1).message, /zr0731\/BiliMusic/)
   mode = 'error'; await h.updater.checkForUpdates(true)
   assert.equal(h.events.at(-1).type, 'error')
   mode = 'missing'; await h.updater.checkForUpdates(true)
@@ -197,7 +213,7 @@ test('new shell takes precedence over OTA and electron-updater feed is pinned to
   await h.updater.checkForUpdates(true)
   assert.equal(h.staged, 0)
   assert.equal(h.shellChecks, 1)
-  assert.equal(h.feed[0].owner, 'Withnoidea')
+  assert.equal(h.feed[0].owner, 'zr0731')
   assert.equal(h.feed[0].repo, 'BiliMusic')
   assert.equal(h.events.at(-1).type, 'up-to-date')
 })

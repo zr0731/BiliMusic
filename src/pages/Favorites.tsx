@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react'
 import { Check, CheckSquare, Download, Heart, Loader2, Play, Square, X } from 'lucide-react'
 import { usePlayer } from '@/contexts/PlayerContext'
 import AddToPlaylistButton from '@/components/AddToPlaylistButton'
+import { UnavailableCheckButton } from '@/components/UnavailableTracks'
 import { loadFavoriteTracks, removeFavoriteTrack, removeMultipleFavoriteTracks, FAVORITES_CHANGED_EVENT } from '@/utils/storage'
 import {
   downloadTracks, downloadSingleTrack,
@@ -164,6 +165,11 @@ export default function Favorites() {
                 )}
                 {downloadAllBusy ? `正在下载 ${downloadProgress}` : '下载全部'}
               </ActionButton>
+              <UnavailableCheckButton
+                tracks={tracks}
+                scopeLabel="我喜欢"
+                onRemove={(ids) => setTracks(removeMultipleFavoriteTracks(ids))}
+              />
               <ActionButton tone="subtle" onClick={toggleEditing}>
                 {editing ? '完成多选' : '批量操作'}
               </ActionButton>

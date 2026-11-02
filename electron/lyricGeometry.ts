@@ -1,12 +1,16 @@
-/** Four DIP inset; the entire text container stays visible on every display. */
+/** 歌词条可以伸出屏幕，只要还留得住一截，才能盖到右下角的小窗上。 */
 export function clampLyricBounds(x: number, y: number, width: number, height: number,
   area: { x: number; y: number; width: number; height: number }) {
-  const gap = 4
-  width = Math.max(1, Math.min(width, area.width - gap * 2))
-  height = Math.max(1, Math.min(height, area.height - gap * 2))
+  const keepX = Math.min(180, Math.max(48, area.width - 8))
+  const keepY = Math.min(48, Math.max(24, area.height - 8))
+  const minX = area.x + keepX - width
+  const maxX = area.x + area.width - keepX
+  const minY = area.y + keepY - height
+  const maxY = area.y + area.height - keepY
   return {
-    x: Math.round(Math.max(area.x + gap, Math.min(x, area.x + area.width - width - gap))),
-    y: Math.round(Math.max(area.y + gap, Math.min(y, area.y + area.height - height - gap))),
-    width: Math.round(width), height: Math.round(height),
+    x: Math.round(Math.min(Math.max(x, Math.min(minX, maxX)), Math.max(minX, maxX))),
+    y: Math.round(Math.min(Math.max(y, Math.min(minY, maxY)), Math.max(minY, maxY))),
+    width: Math.round(Math.max(1, width)),
+    height: Math.round(Math.max(1, height)),
   }
 }

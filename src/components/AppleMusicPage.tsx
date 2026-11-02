@@ -7,9 +7,9 @@ export function MusicPageShell({ children }: { children: React.ReactNode }) {
   return (
     <motion.div
       className="am-page"
-      initial={{ opacity: 0, y: 16 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: 0.12, ease: [0.22, 1, 0.36, 1] }}
     >
       {children}
     </motion.div>
@@ -134,27 +134,32 @@ export function TrackList({ children }: { children: React.ReactNode }) {
 export function TrackListRow({
   track,
   index,
+  rowIndex,
   isCurrent,
   isPlaying,
   onPlay,
+  onPointerDown,
+  className,
   leading,
   extra,
 }: {
   track: Track
   index?: number
+  rowIndex?: number
   isCurrent?: boolean
   isPlaying?: boolean
   onPlay: () => void
+  onPointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void
+  className?: string
   leading?: React.ReactNode
   extra?: React.ReactNode
 }) {
   return (
-    <motion.div
-      className={`am-track-row ${isCurrent ? 'is-current' : ''}`}
+    <div
+      className={`am-track-row ${isCurrent ? 'is-current' : ''} ${className || ''}`}
+      data-playlist-index={rowIndex}
+      onPointerDown={onPointerDown}
       onClick={onPlay}
-      whileHover={{ y: -1 }}
-      whileTap={{ scale: 0.995 }}
-      transition={{ duration: 0.18 }}
     >
       {index !== undefined && (
         <span className="am-track-row__index">
@@ -174,7 +179,7 @@ export function TrackListRow({
       <div className="am-track-row__actions">
         {extra || <TrackActions track={track} size={15} />}
       </div>
-    </motion.div>
+    </div>
   )
 }
 

@@ -1,19 +1,30 @@
 import { useCoverColor } from '@/hooks/useCoverColor'
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import {
-  ChevronDown, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat,
-  Heart, Volume2, VolumeX, Search, Music, Loader2, Maximize2, Minimize2, X, MessageCircle, ExternalLink, ThumbsUp, RefreshCw,
+  ChevronDown, Minus, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat,
+  Heart, Volume2, VolumeX, Search, Music, Loader2, Maximize2, Minimize2, X, MessageCircle, ExternalLink, ThumbsUp, RefreshCw, PictureInPicture, Captions,
 } from 'lucide-react'
-import { usePlayer, usePlayerProgress } from '@/contexts/PlayerContext'
+import { loadVideoWindowEnabled, saveVideoWindowEnabled, VIDEO_WINDOW_CHANGED_EVENT } from '@/hooks/useVideoWindow'
+import { loadDesktopLyricsSettings, saveDesktopLyricsSettings } from '@/hooks/useDesktopLyrics'
+import { usePlayer, usePlayerProgress, usePlayerVolume } from '@/contexts/PlayerContext'
 import { useNowPlaying } from '@/contexts/NowPlayingContext'
 import { useAppSettings } from '@/hooks/useAppSettings'
 import { useLyrics } from '@/hooks/useLyrics'
 import PlayerSlider from '@/components/PlayerSlider'
 import LyricsView from '@/components/LyricsView'
-import type { LyricCandidate } from '@/services/lyrics'
+import { likelySongName, previewLyricLines, type LyricCandidate } from '@/services/lyrics'
+import { pageCidOf } from '@/services/biliBatchSource'
+import { getVideoDetail } from '@/services/bilibiliApi'
 import { getVideoComments, type VideoComment } from '@/services/api'
+
+function formatLyricOffset(seconds: number): string {
+  const value = Math.round(seconds * 10) / 10
+  if (value > 0) return `+${value.toFixed(1)}`
+  return value.toFixed(1)
+}
 
 const sliderTheme = {
   ['--track-bg']: 'rgba(255,255,255,0.18)',
@@ -28,6 +39,7 @@ const commentPageSize = 20
 export default function NowPlaying() {
   const navigate = useNavigate()
   const player = usePlayer()
+  const volumeState = usePlayerVolume()
   const { progress, duration: liveDuration, setProgress } = usePlayerProgress()
   const { expanded, close } = useNowPlaying()
   const { settings } = useAppSettings()
@@ -36,6 +48,8 @@ export default function NowPlaying() {
   const lyrics = useLyrics(track, expanded && settings.showLyrics)
   const duration = liveDuration || track?.duration || 0
   const [fullscreen, setFullscreen] = useState(false)
+  const [videoWindowOn, setVideoWindowOn] = useState(loadVideoWindowEnabled)
+  const [desktopLyricsOn, setDesktopLyricsOn] = useState(() => loadDesktopLyricsSettings().enabled)
   const [controlsVisible, setControlsVisible] = useState(true)
   const [commentsOpen, setCommentsOpen] = useState(false)
   const [commentsStatus, setCommentsStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
@@ -57,6 +71,26 @@ export default function NowPlaying() {
     if (!api) return
     api.isFullscreen?.().then(setFullscreen).catch(() => {})
     return api.onFullscreenChange?.(setFullscreen)
+  }, [])
+
+  useEffect(() => {
+    const sync = () => setVideoWindowOn(loadVideoWindowEnabled())
+    window.addEventListener(VIDEO_WINDOW_CHANGED_EVENT, sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener(VIDEO_WINDOW_CHANGED_EVENT, sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
+
+  useEffect(() => {
+    const sync = () => setDesktopLyricsOn(loadDesktopLyricsSettings().enabled)
+    window.addEventListener('DESKTOP_LYRICS_CHANGED_EVENT', sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener('DESKTOP_LYRICS_CHANGED_EVENT', sync)
+      window.removeEventListener('storage', sync)
+    }
   }, [])
 
   useEffect(() => {
@@ -90,7 +124,21 @@ export default function NowPlaying() {
 
   const openSourceVideo = () => {
     if (!track?.bvid) return
-    window.electronAPI?.openExternal?.(`https://www.bilibili.com/video/${track.bvid}`)
+    const cid = pageCidOf(track)
+    const saved = track.videoUrl?.includes('bilibili.com/video/') ? track.videoUrl : ''
+    if (saved.includes('?p=') || !cid) {
+      window.electronAPI?.openExternal?.(saved || `https://www.bilibili.com/video/${track.bvid}`)
+      return
+    }
+    void getVideoDetail(track.bvid).then(detail => {
+      const index = detail.pages?.findIndex(page => String(page.cid) === String(cid)) ?? -1
+      const url = index >= 0
+        ? `https://www.bilibili.com/video/${track.bvid}?p=${index + 1}`
+        : `https://www.bilibili.com/video/${track.bvid}`
+      window.electronAPI?.openExternal?.(url)
+    }).catch(() => {
+      window.electronAPI?.openExternal?.(`https://www.bilibili.com/video/${track.bvid}`)
+    })
   }
 
   const loadComments = useCallback(async (page = 1) => {
@@ -164,10 +212,10 @@ export default function NowPlaying() {
           key="now-playing"
           style={{ '--cover-color': ambient } as React.CSSProperties}
           className={`now-playing ${fullscreen ? 'is-fullscreen' : ''} ${fullscreen && !controlsVisible ? 'is-immersive-idle' : ''}`}
-          initial={{ opacity: 0, scale: 1.015 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.985 }}
-          transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
         >
           <div className="now-playing-smoke" aria-hidden="true">
             <span />
@@ -177,19 +225,8 @@ export default function NowPlaying() {
           <div className="now-playing-bg">
             {track.coverUrl && (
               <>
-                <motion.div
-                  className="now-playing-bg__cover"
-                  style={{ backgroundImage: `url(${track.coverUrl})` }}
-                  initial={{ opacity: 0, scale: 1.12 }}
-                  animate={{ opacity: 0.72, scale: [1.16, 1.25, 1.18] }}
-                  transition={{ opacity: { duration: 0.8 }, scale: { duration: 22, repeat: Infinity, ease: 'easeInOut' } }}
-                />
-                <motion.div
-                  className="now-playing-bg__disc"
-                  style={{ backgroundImage: `url(${track.coverUrl})` }}
-                  animate={{ rotate: player.isPlaying ? 360 : 0 }}
-                  transition={{ duration: 34, repeat: player.isPlaying ? Infinity : 0, ease: 'linear' }}
-                />
+                <div className="now-playing-bg__cover" style={{ backgroundImage: `url(${track.coverUrl})` }} />
+                <div className={`now-playing-bg__disc${player.isPlaying ? ' is-spinning' : ''}`} style={{ backgroundImage: `url(${track.coverUrl})` }} />
               </>
             )}
           </div>
@@ -209,6 +246,32 @@ export default function NowPlaying() {
             <div className="now-playing-top__actions" style={noDrag}>
               <motion.button
                 type="button"
+                className={`now-playing-close${desktopLyricsOn ? ' is-active' : ''}`}
+                onClick={() => {
+                  if (!window.electronAPI?.desktopLyrics) { player.showToast('桌面歌词仅在桌面客户端可用'); return }
+                  saveDesktopLyricsSettings({ ...loadDesktopLyricsSettings(), enabled: !desktopLyricsOn })
+                }}
+                title={desktopLyricsOn ? '关闭桌面歌词' : '桌面歌词'}
+                whileHover={{ y: 1, backgroundColor: 'rgba(255,255,255,0.18)' }}
+                whileTap={{ scale: 0.92 }}
+              >
+                <Captions size={18} />
+              </motion.button>
+              <motion.button
+                type="button"
+                className={`now-playing-close${videoWindowOn ? ' is-active' : ''}`}
+                onClick={() => {
+                  if (!window.electronAPI?.videoWindow) { player.showToast('小窗仅在桌面客户端可用'); return }
+                  saveVideoWindowEnabled(!videoWindowOn)
+                }}
+                title={videoWindowOn ? '关闭小窗' : '小窗播放'}
+                whileHover={{ y: 1, backgroundColor: 'rgba(255,255,255,0.18)' }}
+                whileTap={{ scale: 0.92 }}
+              >
+                <PictureInPicture size={18} />
+              </motion.button>
+              <motion.button
+                type="button"
                 className="now-playing-close"
                 onClick={openSourceVideo}
                 title="在浏览器中打开视频"
@@ -216,6 +279,16 @@ export default function NowPlaying() {
                 whileTap={{ scale: 0.92 }}
               >
                 <ExternalLink size={18} />
+              </motion.button>
+              <motion.button
+                type="button"
+                className="now-playing-close"
+                onClick={() => window.electronAPI?.minimize?.()}
+                title="最小化"
+                whileHover={{ y: 1, backgroundColor: 'rgba(255,255,255,0.18)' }}
+                whileTap={{ scale: 0.92 }}
+              >
+                <Minus size={18} />
               </motion.button>
               <motion.button
                 type="button"
@@ -243,43 +316,33 @@ export default function NowPlaying() {
           <main className="now-playing-main">
             <motion.section
               className="now-playing-left"
-              initial={{ opacity: 0, y: 24 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ ...spring, delay: 0.08 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.22, delay: 0.04 }}
             >
               <div className="now-playing-cover-wrap">
-                <motion.div
-                  className="now-playing-cover-glow"
-                  animate={{ opacity: player.isPlaying ? [0.35, 0.72, 0.4] : 0.26 }}
-                  transition={{ duration: 3.8, repeat: Infinity, ease: 'easeInOut' }}
-                />
-                <motion.img
-                  layoutId="np-cover"
+                <div className={`now-playing-cover-glow${player.isPlaying ? ' is-playing' : ''}`} />
+                <img
                   className="now-playing-cover"
                   src={track.coverUrl}
                   alt={track.title}
                   loading="eager"
-                  decoding="sync"
+                  decoding="async"
                   draggable={false}
-                  initial={false}
-                  animate={{ opacity: 1, scale: 1, rotateX: 0 }}
-                  transition={spring}
                 />
               </div>
 
               <div className="now-playing-meta">
                 <div className="now-playing-title-block">
-                  <motion.h1 layoutId="np-title" transition={spring}>{track.title}</motion.h1>
-                  <motion.button
+                  <h1>{track.title}</h1>
+                  <button
                     type="button"
                     className="now-playing-artist-link"
-                    layoutId="np-artist"
-                    transition={spring}
                     onClick={openArtistSpace}
                     title={`查看 ${track.artist} 的个人空间`}
                   >
                     {track.artist}
-                  </motion.button>
+                  </button>
                 </div>
                 <motion.button
                   type="button"
@@ -314,20 +377,20 @@ export default function NowPlaying() {
                   <motion.button
                     type="button"
                     className="now-playing-volume-trigger"
-                    onClick={() => player.setIsMuted(!player.isMuted)}
-                    title={player.isMuted ? '取消静音' : '静音'}
+                    onClick={() => volumeState.setIsMuted(!volumeState.isMuted)}
+                    title={volumeState.isMuted ? '取消静音' : '静音'}
                     whileHover={{ scale: 1.08, y: -1 }}
                     whileTap={{ scale: 0.9 }}
                   >
-                    {player.isMuted || player.volume <= 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                    {volumeState.isMuted || volumeState.volume <= 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
                   </motion.button>
                   <div className="now-playing-volume-panel">
                     <PlayerSlider
                       ariaLabel="音量"
-                      value={player.isMuted ? 0 : player.volume}
+                      value={volumeState.isMuted ? 0 : volumeState.volume}
                       max={100}
                       step={5}
-                      onChange={(v) => { player.setVolume(Math.round(v)); if (player.isMuted && v > 0) player.setIsMuted(false) }}
+                      onChange={(v) => { volumeState.setVolume(v); if (volumeState.isMuted && v > 0) volumeState.setIsMuted(false) }}
                       variant="volume"
                     />
                   </div>
@@ -376,9 +439,9 @@ export default function NowPlaying() {
 
             <motion.section
               className="now-playing-lyrics-card"
-              initial={{ opacity: 0, x: 34 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ ...spring, delay: 0.16 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.22, delay: 0.08 }}
             >
               {settings.showLyrics ? (
                 <LyricsPanel lyrics={lyrics} track={track} onSeek={setProgress} currentTime={progress} />
@@ -524,31 +587,76 @@ function LyricsPanel({
   onSeek: (t: number) => void
   currentTime: number
 }) {
-  const { status, result, search, choose, retry } = lyrics
+  const { status, result, search, choose, retry, setOffset, setOffsetTo, keepEmpty } = lyrics
+  const offset = result?.offset || 0
+  const [offsetText, setOffsetText] = useState(formatLyricOffset(offset))
+  useEffect(() => { setOffsetText(formatLyricOffset(offset)) }, [offset])
+  const commitOffset = () => {
+    const value = Number(offsetText)
+    if (!Number.isFinite(value)) {
+      setOffsetText(formatLyricOffset(offset))
+      return
+    }
+    setOffsetTo(value)
+  }
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<LyricCandidate[]>([])
   const [searching, setSearching] = useState(false)
+  const searchGen = useRef(0)
   const [choosingId, setChoosingId] = useState<string | null>(null)
+  const [pickNote, setPickNote] = useState('')
+  const [hoverPreview, setHoverPreview] = useState<{ id: string; top: number; left: number; lines: string[] | null } | null>(null)
+  const hoverGen = useRef(0)
 
-  const openSearch = () => {
-    setQuery(`${track.title} ${track.artist}`.trim())
-    setResults([])
-    setSearchOpen(true)
-  }
-
-  const doSearch = async () => {
-    if (!query.trim()) return
+  const runSearch = async (text: string) => {
+    if (!text.trim()) return
+    const gen = ++searchGen.current
     setSearching(true)
-    const r = await search(query)
+    setHoverPreview(null)
+    const r = await search(text)
+    if (gen !== searchGen.current) return
     setResults(r)
     setSearching(false)
   }
 
+  const openSearch = () => {
+    const name = likelySongName(track.title)
+    setQuery(name)
+    setResults([])
+    setSearchOpen(true)
+    void runSearch(name)
+  }
+
+  const doSearch = async () => {
+    await runSearch(query)
+  }
+
+  const showPreview = (record: LyricCandidate, anchor: HTMLElement) => {
+    const box = anchor.getBoundingClientRect()
+    const width = 320
+    const left = box.right + 12 + width > window.innerWidth ? Math.max(12, box.left - width - 12) : box.right + 12
+    const top = Math.min(box.top, window.innerHeight - 300)
+    const gen = ++hoverGen.current
+    setHoverPreview({ id: record.id, top, left, lines: null })
+    void previewLyricLines(record, 10).then(lines => {
+      if (gen !== hoverGen.current) return
+      setHoverPreview({ id: record.id, top, left, lines })
+    }).catch(() => {
+      if (gen !== hoverGen.current) return
+      setHoverPreview({ id: record.id, top, left, lines: [] })
+    })
+  }
+
   const pick = async (record: LyricCandidate) => {
     setChoosingId(record.id)
-    await choose(record)
+    setPickNote('')
+    const reason = await choose(record)
     setChoosingId(null)
+    if (reason) {
+      setPickNote(reason)
+      return
+    }
     setSearchOpen(false)
   }
 
@@ -565,14 +673,33 @@ function LyricsPanel({
           <Centered>
             <Music size={42} strokeWidth={1.25} />
             <strong>暂无歌词</strong>
-            <span>这首歌在歌词库里还没有匹配到</span>
+            <span>没有配上歌词。只在 B 站发布的歌，留空也可以</span>
             <button type="button" onClick={openSearch}><Search size={14} /> 手动搜索歌词</button>
+            <button type="button" onClick={keepEmpty}>先不显示歌词</button>
           </Centered>
         )}
         {(status === 'ok' || status === 'unsynced') && result && (
           <>
+            <div className="lyrics-panel__tools">
+              <button type="button" onClick={openSearch}><Search size={14} /> 手动搜索歌词</button>
+              <button type="button" onClick={keepEmpty}>先不显示歌词</button>
+              {result.synced && (
+                <span className="lyric-offset">
+                  <button type="button" title="词比声音早出来时点这个，每次 0.5 秒" onClick={() => setOffset(-0.5)}>词快了</button>
+                  <input
+                    aria-label="词比声音晚就填正数，词比声音早就填负数，单位是秒"
+                    title="正数：词慢了，往前赶。负数：词快了，往后让"
+                    value={offsetText}
+                    onChange={event => setOffsetText(event.target.value)}
+                    onBlur={commitOffset}
+                    onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
+                  />
+                  <button type="button" title="词比声音晚出来时点这个，每次 0.5 秒" onClick={() => setOffset(0.5)}>词慢了</button>
+                </span>
+              )}
+            </div>
             {status === 'unsynced' && <div className="lyrics-panel__hint">该版本无逐行时间轴，按普通歌词显示</div>}
-            <LyricsView lines={result.lines} currentTime={currentTime} synced={result.synced} onSeek={onSeek} />
+            <LyricsView lines={result.lines} currentTime={currentTime + (result.offset || 0)} synced={result.synced} onSeek={onSeek} />
           </>
         )}
       </div>
@@ -605,8 +732,17 @@ function LyricsPanel({
             </div>
             <div className="lyrics-drawer__list">
               {results.length === 0 && !searching && <div className="lyrics-drawer__empty">输入歌名或歌手后搜索</div>}
+              {pickNote && <div className="lyrics-drawer__empty">{pickNote}</div>}
               {results.map((r) => (
-                <button key={r.id} type="button" className="lyrics-candidate" onClick={() => pick(r)} disabled={choosingId === r.id}>
+                <button
+                  key={r.id}
+                  type="button"
+                  className="lyrics-candidate"
+                  onClick={() => pick(r)}
+                  onMouseEnter={(event) => showPreview(r, event.currentTarget)}
+                  onMouseLeave={() => { hoverGen.current += 1; setHoverPreview(null) }}
+                  disabled={choosingId === r.id}
+                >
                   <span>
                     <strong>{r.trackName}</strong>
                     <small>{r.artistName} · {r.albumName || 'QQ Music'} · {formatTime(r.duration)}</small>
@@ -618,6 +754,14 @@ function LyricsPanel({
             <button type="button" className="lyrics-drawer__retry" onClick={() => { retry(); setSearchOpen(false) }}>
               重新自动匹配
             </button>
+            {hoverPreview && createPortal(
+              <div className="lyrics-hover-card" style={{ top: hoverPreview.top, left: hoverPreview.left }}>
+                {hoverPreview.lines == null ? '正在取一段歌词…' : hoverPreview.lines.length
+                  ? hoverPreview.lines.map((line, index) => <p key={`${hoverPreview.id}-${index}`}>{line}</p>)
+                  : '这版没有可唱的句子'}
+              </div>,
+              document.body,
+            )}
           </motion.div>
         )}
       </AnimatePresence>

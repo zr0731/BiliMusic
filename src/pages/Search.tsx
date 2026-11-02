@@ -1,4 +1,4 @@
-import { AnimatePresence, LayoutGroup, motion } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowLeft, ChevronRight, Loader2, Music, Play, Search, Sparkles, UserRound, Users, Video, X } from 'lucide-react'
 import { useState, useCallback, useRef, useEffect, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
@@ -26,12 +26,12 @@ const pageMotion = {
 
 const listMotion = {
   initial: { opacity: 0 },
-  animate: { opacity: 1, transition: { staggerChildren: 0.035, delayChildren: 0.03 } },
+  animate: { opacity: 1 },
 }
 
 const itemMotion = {
-  initial: { opacity: 0, y: 12, scale: 0.985 },
-  animate: { opacity: 1, y: 0, scale: 1 },
+  initial: { opacity: 0 },
+  animate: { opacity: 1 },
 }
 
 function getScrollParent(element: HTMLElement | null): HTMLElement | null {
@@ -109,6 +109,9 @@ export default function SearchPage() {
   const pageRef = useRef(1)
   const totalPagesRef = useRef(0)
   const currentQueryRef = useRef('')
+  const searchGen = useRef(0)
+  const videoPageCache = useRef(new Map<string, { items: SearchItem[]; totalResults: number; totalPages: number }>())
+  const userPageCache = useRef(new Map<string, { items: UserResult[]; totalResults: number; totalPages: number }>())
   const consumedOpenArtistRef = useRef('')
   const pageRootRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -132,24 +135,68 @@ export default function SearchPage() {
   const executeSearch = useCallback(async (keyword: string, type: SearchType) => {
     if (!keyword.trim()) return
     const normalizedKeyword = keyword.trim()
-    setLoading(true)
+    const gen = ++searchGen.current
     setError(null)
     setLoadMoreError(null)
     setReachedEnd(false)
     setSelectedUser(null)
-    setResults([])
-    setUserResults([])
     pageRef.current = 1
     currentQueryRef.current = normalizedKeyword
+    const showCached = (itemsAreVideos: boolean, totalResults: number, totalPages: number) => {
+      setTotalResults(totalResults)
+      totalPagesRef.current = totalPages
+      setResultType(type)
+      setHasSearched(true)
+      setLoading(false)
+      if (itemsAreVideos) setUserResults([])
+      else setResults([])
+    }
+    if (type === 'video') {
+      const cached = videoPageCache.current.get(normalizedKeyword)
+      if (cached) {
+        setResults(cached.items)
+        showCached(true, cached.totalResults, cached.totalPages)
+      } else {
+        setLoading(true)
+        setResults([])
+        setUserResults([])
+      }
+      if (!userPageCache.current.has(normalizedKeyword)) {
+        void searchUsers(normalizedKeyword, 1).then(data => {
+          userPageCache.current.set(normalizedKeyword, { items: data.items, totalResults: data.totalResults, totalPages: data.totalPages })
+        }).catch(() => {})
+      }
+      if (cached) return
+    } else {
+      const cached = userPageCache.current.get(normalizedKeyword)
+      if (cached) {
+        setUserResults(cached.items)
+        showCached(false, cached.totalResults, cached.totalPages)
+      } else {
+        setLoading(true)
+        setResults([])
+        setUserResults([])
+      }
+      if (!videoPageCache.current.has(normalizedKeyword)) {
+        void searchVideo(normalizedKeyword, 1).then(data => {
+          videoPageCache.current.set(normalizedKeyword, { items: data.items, totalResults: data.totalResults, totalPages: data.totalPages })
+        }).catch(() => {})
+      }
+      if (cached) return
+    }
 
     try {
       if (type === 'video') {
         const data = await searchVideo(normalizedKeyword, 1)
+        if (searchGen.current !== gen) return
+        videoPageCache.current.set(normalizedKeyword, { items: data.items, totalResults: data.totalResults, totalPages: data.totalPages })
         setResults(data.items)
         setTotalResults(data.totalResults)
         totalPagesRef.current = data.totalPages
       } else {
         const data = await searchUsers(normalizedKeyword, 1)
+        if (searchGen.current !== gen) return
+        userPageCache.current.set(normalizedKeyword, { items: data.items, totalResults: data.totalResults, totalPages: data.totalPages })
         setUserResults(data.items)
         setTotalResults(data.totalResults)
         totalPagesRef.current = data.totalPages
@@ -157,9 +204,10 @@ export default function SearchPage() {
       setResultType(type)
       setHasSearched(true)
     } catch (e: any) {
+      if (searchGen.current !== gen) return
       setError(e.message || '搜索失败')
     } finally {
-      setLoading(false)
+      if (searchGen.current === gen) setLoading(false)
     }
   }, [])
 
@@ -378,12 +426,10 @@ export default function SearchPage() {
           </AnimatePresence>
         </div>
 
-        <LayoutGroup>
-          <div className="apple-search-segment" role="tablist" aria-label="搜索类型">
-            <TypeTab active={searchType === 'video'} icon={<Video size={15} />} label="视频" onClick={() => switchType('video')} />
-            <TypeTab active={searchType === 'user'} icon={<Users size={15} />} label="UP主" onClick={() => switchType('user')} />
-          </div>
-        </LayoutGroup>
+        <div className="apple-search-segment" role="tablist" aria-label="搜索类型">
+          <TypeTab active={searchType === 'video'} icon={<Video size={15} />} label="视频" onClick={() => switchType('video')} />
+          <TypeTab active={searchType === 'user'} icon={<Users size={15} />} label="UP主" onClick={() => switchType('user')} />
+        </div>
       </section>
 
       <AnimatePresence>
@@ -486,7 +532,7 @@ function TypeTab({ active, icon, label, onClick }: { active: boolean; icon: Reac
       role="tab"
       aria-selected={active}
     >
-      {active && <motion.span className="apple-search-tab__pill" layoutId="search-tab-pill" transition={{ type: 'spring', stiffness: 420, damping: 34 }} />}
+      {active && <span className="apple-search-tab__pill" />}
       <span className="apple-search-tab__content">
         {icon}
         {label}

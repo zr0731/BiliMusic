@@ -41,8 +41,14 @@ export function useCoverColor(url?: string) {
   useEffect(() => {
     let alive = true
     if (!url) { setColor(fallback); return }
-    void colorFor(url).then(color => { if (alive) setColor(color) })
-    return () => { alive = false }
+    const apply = () => { void colorFor(url).then(color => { if (alive) setColor(color) }) }
+    const idle = window.requestIdleCallback?.(apply, { timeout: 700 })
+    const timer = idle == null ? window.setTimeout(apply, 360) : 0
+    return () => {
+      alive = false
+      if (idle != null) window.cancelIdleCallback?.(idle)
+      if (timer) window.clearTimeout(timer)
+    }
   }, [url])
   return color
 }

@@ -1,9 +1,7 @@
-name: Build Multi-Platform
+name: Build Windows
 
-# 三平台 × 多架构打包 + 自动更新元数据发布。
-# 每个 OS 一个 job，单次 electron-builder 调用构建该 OS 全部架构 —— 这样每个 OS 只产出
-# 一个含多架构 files 数组的 latest*.yml（electron-updater 按运行架构自选），避免多 job 覆盖。
-# Linux job 额外产出平台无关的 OTA 渲染包（renderer-<v>.asar + ota.json）供渲染热补丁下发。
+# 只打 Windows 的 x64、ia32、arm64，并在同一次构建里产出平台无关的 OTA 渲染包。
+# macOS、Linux 和鸿蒙已从本 fork 移除，找回方式见 docs/其他系统基线.md。
 # 触发：推送 v* tag，或手动运行（workflow_dispatch，仅构建产物、不发布）。
 on:
   push:
@@ -16,18 +14,8 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            args: --win --x64 --ia32 --arm64
-          - os: macos-latest
-            args: --mac --x64 --arm64
-          - os: ubuntu-latest
-            args: --linux --x64 --arm64
+    name: windows-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -47,25 +35,20 @@ jobs:
 
       - name: Package (生成各架构安装包 + latest*.yml + blockmap)
         # --publish never 不上传，但仍生成 latest*.yml 与 blockmap，由 release job 统一发布
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        run: npx electron-builder --win --x64 --ia32 --arm64 --publish never
         env:
           # CI 无签名证书：跳过 macOS 自动签名，产出未签名包
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      - name: Build OTA renderer bundle (Linux only, 平台无关只产一次)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build OTA renderer bundle
         run: node scripts/build-ota.mjs
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-windows-latest
           path: |
             release/*.exe
-            release/*.dmg
-            release/*.zip
-            release/*.AppImage
-            release/*.deb
             release/*.yml
             release/*.blockmap
             release/ota/ota.json

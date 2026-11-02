@@ -1,29 +1,60 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { Check, CheckSquare, Download, ListMusic, Loader2, Music, Play, RotateCw, Square, Trash2, X } from 'lucide-react'
+import { Check, CheckSquare, Download, ListMusic, Loader2, Music, Play, Square, Trash2, Undo2, X } from 'lucide-react'
 import { usePlayer } from '@/contexts/PlayerContext'
 import { downloadTracks, downloadSingleTrack, isTrackDownloaded } from '@/services/downloadManager'
-import { useImport } from '@/contexts/ImportContext'
 import AddToPlaylistButton from '@/components/AddToPlaylistButton'
+import PlaylistBatchAdd from '@/components/PlaylistBatchAdd'
 import {
   EmptyLibrary,
   MusicHero,
   MusicPageShell,
   MusicSection,
-  TrackList,
   TrackListRow,
 } from '@/components/AppleMusicPage'
+import { clearLyricCache } from '@/services/lyrics'
+import { UnavailableCheckButton } from '@/components/UnavailableTracks'
 import {
   deletePlaylist,
   getPlaylist,
   loadPlaylists,
+  PLAYLIST_UNDO_EVENT,
   PLAYLISTS_CHANGED_EVENT,
+  playlistUndoCount,
   removeTracksFromPlaylist,
+  undoPlaylistAdd,
 } from '@/utils/storage'
 import type { Playlist, Track } from '@/types'
 
 // Keep effect dependencies stable while a playlist is deleted or missing.
 const EMPTY_TRACKS: Track[] = []
+
+function usePlaylistWindow(count: number, enabled: boolean) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [range, setRange] = useState({ start: 0, end: 28 })
+  useEffect(() => {
+    if (!enabled) return
+    const scroller = document.querySelector('.app-content')
+    if (!(scroller instanceof HTMLElement)) return
+    const rowHeight = 72
+    const update = () => {
+      const node = ref.current
+      if (!node) return
+      const listTop = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+      const start = Math.max(0, Math.floor((scroller.scrollTop - listTop) / rowHeight) - 6)
+      const end = Math.min(count, Math.ceil((scroller.scrollTop + scroller.clientHeight - listTop) / rowHeight) + 8)
+      setRange(previous => previous.start === start && previous.end === end ? previous : { start, end: Math.max(end, start + 1) })
+    }
+    update()
+    scroller.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    return () => {
+      scroller.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [count, enabled])
+  return { ref, start: enabled ? range.start : 0, end: enabled ? range.end : count, rowHeight: 72 }
+}
 
 export default function Playlists() {
   const { playlistId } = useParams()
@@ -86,6 +117,75 @@ function PlaylistCard({ playlist }: { playlist: Playlist }) {
   )
 }
 
+const PlaylistTrackRow = memo(function PlaylistTrackRow({
+  track,
+  position,
+  rowIndex,
+  selected,
+  editing,
+  isCurrent,
+  isPlaying,
+  downloaded,
+  downloading,
+  onPointerDown,
+  onPlay,
+  onDownload,
+  onRemove,
+}: {
+  track: Track
+  position: number
+  rowIndex: number
+  selected: boolean
+  editing: boolean
+  isCurrent: boolean
+  isPlaying: boolean
+  downloaded: boolean
+  downloading: boolean
+  onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void
+  onPlay: (track: Track) => void
+  onDownload: (track: Track) => void
+  onRemove: (trackId: string) => void
+}) {
+  return (
+    <TrackListRow
+      track={track}
+      index={position}
+      rowIndex={rowIndex}
+      className={selected ? 'is-selected' : ''}
+      isCurrent={isCurrent}
+      isPlaying={isPlaying}
+      onPlay={() => onPlay(track)}
+      onPointerDown={editing ? onPointerDown : undefined}
+      leading={editing ? (
+        <span className={`playlist-select-button ${selected ? 'is-selected' : ''}`} title={selected ? '取消选择' : '选择'}>
+          {selected ? <CheckSquare size={17} /> : <Square size={17} />}
+        </span>
+      ) : undefined}
+      extra={(
+        <div className="am-extra-actions" onPointerDown={(event) => event.stopPropagation()}>
+          <button
+            className="am-icon-button"
+            onClick={(event) => {
+              event.stopPropagation()
+              if (!downloaded) onDownload(track)
+            }}
+            disabled={downloading || downloaded}
+            title={downloaded ? '已下载到本地' : '下载到本地'}
+          >
+            {downloading ? <Loader2 size={15} className="animate-spin text-accent" /> : downloaded ? <Check size={15} /> : <Download size={15} />}
+          </button>
+          <AddToPlaylistButton track={track} size={15} />
+          {!editing && (
+            <button className="am-icon-danger" onClick={(event) => { event.stopPropagation(); onRemove(track.id) }} title="移出歌单">
+              <X size={16} />
+            </button>
+          )}
+        </div>
+      )}
+    />
+  )
+})
+
 function PlaylistDetail({ playlistId }: { playlistId: string }) {
   const [playlist, setPlaylist] = useState<Playlist | null>(() => getPlaylist(playlistId))
   const [editing, setEditing] = useState(false)
@@ -94,12 +194,28 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
   const [downloadProgress, setDownloadProgress] = useState<string>('')
   const [downloadedIds, setDownloadedIds] = useState<Set<string>>(new Set())
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [query, setQuery] = useState('')
+  const [undoCount, setUndoCount] = useState(() => playlistUndoCount(playlistId))
   const player = usePlayer()
   const { showToast } = player
   const navigate = useNavigate()
-  const { records, resumePlaylist } = useImport()
 
   const tracks = playlist?.tracks ?? EMPTY_TRACKS
+  const shownTracks = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return tracks
+    return tracks.filter(track => [track.bvid, track.id, track.title, track.album, track.artist]
+      .some(value => value?.toLowerCase().includes(needle)))
+  }, [query, tracks])
+  const shownRef = useRef(shownTracks)
+  const editingRef = useRef(editing)
+  const selectedRef = useRef(selectedIds)
+  const skipClickRef = useRef(false)
+  shownRef.current = shownTracks
+  editingRef.current = editing
+  selectedRef.current = selectedIds
+  const windowed = shownTracks.length > 36
+  const listWindow = usePlaylistWindow(shownTracks.length, windowed)
 
   const refreshDownloaded = useCallback(() => {
     const set = new Set<string>()
@@ -154,45 +270,44 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
     }
   }, [playlistId])
 
+  useEffect(() => {
+    const sync = () => setUndoCount(playlistUndoCount(playlistId))
+    sync()
+    window.addEventListener(PLAYLIST_UNDO_EVENT, sync)
+    return () => window.removeEventListener(PLAYLIST_UNDO_EVENT, sync)
+  }, [playlistId])
+
   const heroImage = playlist?.coverUrl || tracks[0]?.coverUrl
   const updatedText = useMemo(() => {
     if (!playlist?.updatedAt) return ''
     return new Date(playlist.updatedAt).toLocaleDateString()
   }, [playlist?.updatedAt])
 
-  // 该歌单是否有未完成的导入（未处理/失败/待确认/未找到 = 尚无已选结果），供右上角"继续导入"
-  const importRecord = records[playlistId]
-  const incompleteCount = importRecord
-    ? importRecord.results.reduce((n, r, i) => {
-        if (!r || r.error) return n + 1
-        return (importRecord.selected[i] ?? r.bestMatch?.bvid) ? n : n + 1
-      }, 0)
-    : 0
-
-  if (!playlist) {
-    return (
-      <MusicPageShell>
-        <EmptyLibrary icon={<ListMusic size={40} />} title="歌单不存在" subtitle="这个歌单可能已经被删除。" />
-        <Link className="am-action am-action--subtle" to="/playlists">返回所有歌单</Link>
-      </MusicPageShell>
-    )
-  }
-
   const handleDelete = () => {
+    if (!playlist) return
     deletePlaylist(playlist.id)
     navigate('/playlists', { replace: true })
   }
 
+  const forgetLyrics = (ids: string[]) => {
+    const stillKept = new Set(loadPlaylists().flatMap(item => item.tracks.map(track => track.id)))
+    for (const id of ids) if (!stillKept.has(id)) clearLyricCache(id)
+  }
+
   const removeSelected = () => {
-    if (selectedIds.size === 0) return
-    const updated = removeTracksFromPlaylist(playlist.id, [...selectedIds])
+    if (!playlist || selectedIds.size === 0) return
+    const ids = [...selectedIds]
+    const updated = removeTracksFromPlaylist(playlist.id, ids)
+    forgetLyrics(ids)
     setPlaylist(updated)
     setSelectedIds(new Set())
     setEditing(false)
   }
 
   const removeOne = (trackId: string) => {
+    if (!playlist) return
     const updated = removeTracksFromPlaylist(playlist.id, [trackId])
+    forgetLyrics([trackId])
     setPlaylist(updated)
     setSelectedIds(prev => {
       const next = new Set(prev)
@@ -210,9 +325,9 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
     })
   }
 
-  const allSelected = tracks.length > 0 && selectedIds.size === tracks.length
+  const allSelected = shownTracks.length > 0 && shownTracks.every(track => selectedIds.has(track.id))
   const toggleAll = () => {
-    setSelectedIds(allSelected ? new Set() : new Set(tracks.map(track => track.id)))
+    setSelectedIds(allSelected ? new Set() : new Set(shownTracks.map(track => track.id)))
   }
 
   const toggleEditing = () => {
@@ -220,6 +335,97 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
       if (prev) setSelectedIds(new Set())
       return !prev
     })
+  }
+
+  const undoAdd = () => {
+    const updated = undoPlaylistAdd(playlistId)
+    if (!updated) return
+    setPlaylist(updated)
+    setSelectedIds(new Set())
+    showToast('已撤回上一次加入')
+  }
+
+  const onRowPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!editingRef.current || event.button !== 0) return
+    if ((event.target as HTMLElement).closest('.am-track-row__actions')) return
+    const anchor = Number(event.currentTarget.dataset.playlistIndex)
+    if (!Number.isInteger(anchor)) return
+    const startX = event.clientX
+    const startY = event.clientY
+    const base = new Set(selectedRef.current)
+    let moved = false
+    let latest = anchor
+    const selectRange = (index: number) => {
+      const from = Math.min(anchor, index)
+      const to = Math.max(anchor, index)
+      const next = new Set(base)
+      const list = shownRef.current
+      for (let i = from; i <= to; i += 1) {
+        const id = list[i]?.id
+        if (!id) continue
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+      }
+      setSelectedIds(next)
+    }
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return
+      if (!moved) {
+        moved = true
+        document.body.classList.add('playlist-selecting')
+      }
+      const hit = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('[data-playlist-index]')
+      let index = Number(hit?.getAttribute('data-playlist-index'))
+      if (!Number.isInteger(index)) {
+        const list = listWindow.ref.current
+        const count = shownRef.current.length
+        if (!list || count === 0) return
+        index = Math.floor((ev.clientY - list.getBoundingClientRect().top) / listWindow.rowHeight)
+        if (index < 0 || index >= count) return
+      }
+      if (index === latest) return
+      latest = index
+      selectRange(index)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      document.body.classList.remove('playlist-selecting')
+      skipClickRef.current = true
+      if (!moved) {
+        const id = shownRef.current[anchor]?.id
+        if (id) toggleSelected(id)
+      }
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }, [])
+
+  const visibleTracks = windowed ? shownTracks.slice(listWindow.start, listWindow.end) : shownTracks
+
+  const playRow = useCallback((track: Track) => {
+    if (skipClickRef.current) {
+      skipClickRef.current = false
+      return
+    }
+    if (editingRef.current) return
+    player.playFromList(track, tracks, playlist?.id)
+  }, [player, tracks, playlist?.id])
+
+  const downloadTrackRef = useRef(handleDownloadTrack)
+  const removeTrackRef = useRef(removeOne)
+  downloadTrackRef.current = handleDownloadTrack
+  removeTrackRef.current = removeOne
+  const downloadRow = useCallback((track: Track) => { void downloadTrackRef.current(track) }, [])
+  const removeRow = useCallback((trackId: string) => removeTrackRef.current(trackId), [])
+
+  if (!playlist) {
+    return (
+      <MusicPageShell>
+        <EmptyLibrary icon={<ListMusic size={40} />} title="歌单不存在" subtitle="这个歌单可能已经被删除。" />
+        <Link className="am-action am-action--subtle" to="/playlists">返回所有歌单</Link>
+      </MusicPageShell>
+    )
   }
 
   return (
@@ -232,19 +438,9 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
         tone="purple"
         action={(
           <>
-            {incompleteCount > 0 && (
-              <button
-                className="am-action am-action--subtle"
-                onClick={() => { resumePlaylist(playlistId); navigate('/import') }}
-                title={`该歌单还有 ${incompleteCount} 首未完成匹配，点击继续导入`}
-              >
-                <RotateCw size={16} />
-                继续导入 {incompleteCount} 首
-              </button>
-            )}
             {tracks.length > 0 && (
               <>
-                <button className="am-action am-action--primary" onClick={() => player.playAll(tracks)}>
+                <button className="am-action am-action--primary" onClick={() => player.playAll(tracks, playlist.id)}>
                   <Play size={17} fill="currentColor" />
                   播放全部
                 </button>
@@ -258,6 +454,17 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
                 </button>
               </>
             )}
+            {tracks.length > 0 && (
+              <UnavailableCheckButton
+                tracks={tracks}
+                scopeLabel="这个歌单"
+                onRemove={(ids) => {
+                  const updated = removeTracksFromPlaylist(playlist.id, ids)
+                  forgetLyrics(ids)
+                  setPlaylist(updated)
+                }}
+              />
+            )}
             <button className="am-action am-action--subtle" onClick={handleDelete}>
               <Trash2 size={16} />
               删除歌单
@@ -266,14 +473,34 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
         )}
       />
 
+      <PlaylistBatchAdd playlistId={playlist.id} onAdded={() => setQuery('')} />
+
       {tracks.length === 0 ? (
-        <EmptyLibrary icon={<Music size={40} />} title="歌单是空的" subtitle="歌单已经创建并持久化保存，后续可以把歌曲加入到这里。" />
+        <EmptyLibrary icon={<Music size={40} />} title="歌单是空的" subtitle="在上面贴上 B 站链接。一个视频里的每个分 P 会单独成为一首。" />
       ) : (
         <MusicSection title="歌曲" icon={<Music size={22} />}>
           <div className={`playlist-editbar ${editing ? 'is-editing' : ''}`}>
             <div>
-              <span>{editing ? `已选择 ${selectedIds.size} 首` : `${tracks.length} 首歌曲`}</span>
+              <span>{editing ? `已选择 ${selectedIds.size} 首` : query.trim() ? `${shownTracks.length} 首匹配` : `${tracks.length} 首歌曲`}</span>
+              <div className="playlist-search-wrap">
+                <input
+                  className="playlist-search"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="搜索 BV 号、歌名、视频名、UP 主"
+                  aria-label="搜索歌单"
+                />
+                {query && (
+                  <button type="button" className="playlist-search__clear" aria-label="清空搜索" onClick={() => setQuery('')}>
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
             </div>
+            <button type="button" onClick={undoAdd} disabled={undoCount === 0}>
+              <Undo2 size={15} />
+              撤回
+            </button>
             {editing && (
               <button type="button" onClick={toggleAll}>
                 {allSelected ? <CheckSquare size={16} /> : <Square size={16} />}
@@ -303,57 +530,38 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
               {editing ? '完成' : '选择'}
             </button>
           </div>
-          <TrackList>
-            {tracks.map((track, index) => (
-              <TrackListRow
-                key={track.id + String(index)}
-                track={track}
-                index={index + 1}
-                isCurrent={player.currentTrack?.id === track.id}
-                isPlaying={player.isPlaying}
-                onPlay={() => editing ? toggleSelected(track.id) : player.playFromList(track, playlist.tracks)}
-                leading={editing ? (
-                  <button
-                    type="button"
-                    className={`playlist-select-button ${selectedIds.has(track.id) ? 'is-selected' : ''}`}
-                    onClick={(e) => { e.stopPropagation(); toggleSelected(track.id) }}
-                    title={selectedIds.has(track.id) ? '取消选择' : '选择'}
-                  >
-                    {selectedIds.has(track.id) ? <CheckSquare size={17} /> : <Square size={17} />}
-                  </button>
-                ) : undefined}
-                extra={(
-                  <div className="am-extra-actions">
-                    <button
-                      className="am-icon-button"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        if (!downloadedIds.has(track.id)) {
-                          handleDownloadTrack(track)
-                        }
-                      }}
-                      disabled={downloadingId === track.id || downloadedIds.has(track.id)}
-                      title={downloadedIds.has(track.id) ? '已下载到本地' : '下载到本地'}
-                    >
-                      {downloadingId === track.id ? (
-                        <Loader2 size={15} className="animate-spin text-accent" />
-                      ) : downloadedIds.has(track.id) ? (
-                        <Check size={15} />
-                      ) : (
-                        <Download size={15} />
-                      )}
-                    </button>
-                    <AddToPlaylistButton track={track} size={15} />
-                    {!editing && (
-                      <button className="am-icon-danger" onClick={(e) => { e.stopPropagation(); removeOne(track.id) }} title="移出歌单">
-                        <X size={16} />
-                      </button>
-                    )}
-                  </div>
-                )}
-              />
-            ))}
-          </TrackList>
+          {shownTracks.length === 0 ? (
+            <p className="playlist-search-empty">没有匹配的歌曲</p>
+          ) : (
+            <div
+              ref={listWindow.ref}
+              className="am-track-list"
+              style={windowed ? { position: 'relative', height: shownTracks.length * listWindow.rowHeight } : undefined}
+            >
+              {(windowed ? visibleTracks : shownTracks).map((track, offset) => {
+                const index = windowed ? listWindow.start + offset : offset
+                return (
+                <div key={track.id} style={windowed ? { position: 'absolute', top: index * listWindow.rowHeight, left: 0, right: 0, height: listWindow.rowHeight } : undefined}>
+                <PlaylistTrackRow
+                  track={track}
+                  position={index + 1}
+                  rowIndex={index}
+                  selected={selectedIds.has(track.id)}
+                  editing={editing}
+                  isCurrent={player.currentTrack?.id === track.id}
+                  isPlaying={player.isPlaying}
+                  downloaded={downloadedIds.has(track.id)}
+                  downloading={downloadingId === track.id}
+                  onPointerDown={onRowPointerDown}
+                  onPlay={playRow}
+                  onDownload={downloadRow}
+                  onRemove={removeRow}
+                />
+                </div>
+                )
+              })}
+            </div>
+          )}
         </MusicSection>
       )}
     </MusicPageShell>

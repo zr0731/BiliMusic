@@ -16,7 +16,7 @@
     ·
     <a href="#-构建与打包">构建与打包</a>
     ·
-    <a href="https://github.com/Withnoidea/BiliMusic">GitHub</a>
+    <a href="https://github.com/zr0731/BiliMusic">GitHub</a>
   </p>
   <p>
     <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=111" />
@@ -147,13 +147,13 @@
 ### 运行环境要求
 - **Node.js**: >= 18.0.0
 - **npm** 或 **pnpm**
-- **操作系统**: Windows 10/11 x64 (macOS / Linux 亦支持前端开发)
+- **操作系统**: Windows 10/11 x64。本 fork 不打包 macOS、Linux 或鸿蒙。
 
 ### 本地启动与调试
 
 ```bash
 # 1. 克隆本项目
-git clone https://github.com/Withnoidea/BiliMusic.git
+git clone https://github.com/zr0731/BiliMusic.git
 cd BiliMusic
 
 # 2. 安装项目依赖
@@ -206,8 +206,8 @@ npm run electron:build
 
 ## 本 fork 的检查更新与发布
 
-- 当前维护仓库：[Withnoidea/BiliMusic](https://github.com/Withnoidea/BiliMusic)。
-- 安装包与版本说明：[Releases](https://github.com/Withnoidea/BiliMusic/releases)；问题反馈：[Issues](https://github.com/Withnoidea/BiliMusic/issues)。
+- 当前维护仓库：[zr0731/BiliMusic](https://github.com/zr0731/BiliMusic)。
+- 安装包与版本说明：[Releases](https://github.com/zr0731/BiliMusic/releases)；问题反馈：[Issues](https://github.com/zr0731/BiliMusic/issues)。
 - 客户端仅从本 fork 检查与下载更新，不回退到原作者的更新源。尚未发布正式 Release 时显示“暂无可用的正式发布版本”，不误报“已是最新版本”。
 - 未提供 `ota.json` 时检查本 fork 的最新正式 Release，有新版本则引导手动下载；完整自动更新需要一并发布安装包、`latest*.yml` 和 OTA 清单等资产。
 - 保留原应用 ID、已有歌单与登录存储；旧上游 OTA 缓存不再覆盖本 fork 内置界面。原作者署名与致谢保留。

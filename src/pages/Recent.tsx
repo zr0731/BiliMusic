@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Clock, Play, Trash2 } from 'lucide-react'
 import { usePlayer } from '@/contexts/PlayerContext'
-import { loadRecentTracks, saveRecentTracks } from '@/utils/storage'
+import { UnavailableCheckButton } from '@/components/UnavailableTracks'
+import { loadRecentTracks, removeRecentTracks, RECENT_CHANGED_EVENT, saveRecentTracks } from '@/utils/storage'
 import {
   ActionButton,
   EmptyLibrary,
@@ -17,6 +18,12 @@ import type { Track } from '@/types'
 export default function Recent() {
   const [tracks, setTracks] = useState<Track[]>(() => loadRecentTracks())
   const player = usePlayer()
+
+  useEffect(() => {
+    const sync = () => setTracks(loadRecentTracks())
+    window.addEventListener(RECENT_CHANGED_EVENT, sync)
+    return () => window.removeEventListener(RECENT_CHANGED_EVENT, sync)
+  }, [])
 
   const handleClear = useCallback(() => {
     saveRecentTracks([])
@@ -43,6 +50,15 @@ export default function Recent() {
               <Play size={17} fill="currentColor" />
               播放全部
             </ActionButton>
+            <UnavailableCheckButton
+              tracks={tracks}
+              scopeLabel="最近播放"
+              className="am-action am-action--subtle"
+              onRemove={(ids) => {
+                removeRecentTracks(ids)
+                setTracks(loadRecentTracks())
+              }}
+            />
             <ActionButton onClick={handleClear} tone="subtle">
               <Trash2 size={16} />
               清空

@@ -1,7 +1,7 @@
 {
   "name": "bilimusic",
   "private": true,
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "BiliMusic - 基于 Bilibili 的桌面音乐播放器",
   "author": "Hanversion",
   "type": "module",
@@ -16,8 +16,6 @@
     "electron:dev": "vite",
     "electron:start": "npm run build && electron .",
     "electron:build": "npm run build && electron-builder",
-    "harmony:prepare": "npm run build && node scripts/prepare-harmony.mjs",
-    "harmony:build": "npm run harmony:prepare && node scripts/build-harmony.mjs",
     "build:ota": "npm run build && node scripts/build-ota.mjs",
     "lint": "eslint src electron"
   },
@@ -60,7 +58,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "Withnoidea",
+        "owner": "zr0731",
         "repo": "BiliMusic"
       }
     ],
@@ -88,39 +86,16 @@
       "uninstallDisplayName": "BiliMusic ${version}",
       "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
     },
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "icon": "electron/icon.png",
-      "category": "public.app-category.music",
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
-    },
-    "dmg": {
-      "title": "${productName} ${version}"
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "icon": "electron/icon.png",
-      "category": "AudioVideo",
-      "maintainer": "Hanversion <hanversion@gmail.com>",
-      "synopsis": "基于 Bilibili 的桌面音乐播放器",
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
-    },
     "asarUnpack": [
       "node_modules/ffmpeg-static/**"
     ]
   },
-  "homepage": "https://github.com/Withnoidea/BiliMusic",
+  "homepage": "https://github.com/zr0731/BiliMusic",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Withnoidea/BiliMusic.git"
+    "url": "https://github.com/zr0731/BiliMusic.git"
   },
   "bugs": {
-    "url": "https://github.com/Withnoidea/BiliMusic/issues"
+    "url": "https://github.com/zr0731/BiliMusic/issues"
   }
 }

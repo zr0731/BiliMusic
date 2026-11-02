@@ -4,6 +4,8 @@
  * 已验证的 API 接口，通过浏览器 Cookie 认证访问 B 站接口
  */
 
+import { rememberSmallVideo, rememberVideoDesc } from '@/services/videoWindowSource'
+
 const BILI_API = 'https://api.bilibili.com'
 async function biliRequest(input: string, init?: RequestInit): Promise<Pick<Response, 'json'>> {
   if (window.electronAPI?.biliApi && input.startsWith(BILI_API + '/')) {
@@ -316,6 +318,34 @@ export async function getUserVideos(
   return data.data as SpaceArcSearchData
 }
 
+export interface FavoriteResourcePage {
+  info?: { media_count?: number; title?: string }
+  medias?: Array<{ bvid?: string; type?: number }> | null
+}
+
+export async function getFavoriteResources(mediaId: number, page = 1, pageSize = 20): Promise<FavoriteResourcePage> {
+  return biliFetch('/x/v3/fav/resource/list', {
+    params: { media_id: mediaId, pn: page, ps: pageSize, platform: 'web', order: 'mtime' },
+  })
+}
+
+export interface ArchiveListPage {
+  archives?: Array<{ bvid?: string }>
+  page?: { total?: number }
+}
+
+export async function getSeasonArchives(mid: number, seasonId: number, page = 1, pageSize = 30): Promise<ArchiveListPage> {
+  return biliFetch('/x/polymer/web-space/seasons_archives_list', {
+    params: { mid, season_id: seasonId, sort_reverse: 'false', page_num: page, page_size: pageSize },
+  })
+}
+
+export async function getSeriesArchives(mid: number, seriesId: number, page = 1, pageSize = 30): Promise<ArchiveListPage> {
+  return biliFetch('/x/series/archives', {
+    params: { mid, series_id: seriesId, only_normal: 'true', sort: 'desc', pn: page, ps: pageSize },
+  })
+}
+
 // ===== 视频详情 =====
 
 export interface VideoOwner {
@@ -352,10 +382,13 @@ export interface VideoDetail {
   videos: number
   pages: VideoPage[]
   pubdate: number
+  ugc_season?: { id?: number; mid?: number; title?: string; ep_count?: number } | null
 }
 
 export async function getVideoDetail(bvid: string): Promise<VideoDetail> {
-  return biliFetch('/x/web-interface/view', { params: { bvid } })
+  const detail = await biliFetch<VideoDetail>('/x/web-interface/view', { params: { bvid } })
+  rememberVideoDesc(detail.bvid || bvid, detail.desc || '')
+  return detail
 }
 
 // ===== 评论 =====
@@ -649,29 +682,54 @@ export async function extractAudioFromSearch(
  * fallback：音乐中心曲目的顶层 avid+cid。部分曲目的 bvid 稿件已不存在
  * （/x/web-interface/view 返回 -404），但其音乐原生流可经 avid+cid 直取。
  */
+function sourceFromPlay(bvid: string, cid: number, playData: PlayUrlData, detail: VideoDetail | null): TrackSource {
+  rememberSmallVideo(detail?.bvid || bvid, cid, playData.dash?.video)
+  const audioUrl = getBestAudioUrl(playData)
+  const bestAudio = [...playData.dash.audio].sort((a, b) => b.bandwidth - a.bandwidth)[0]
+  const page = detail?.pages?.find(item => item.cid === cid)
+  return {
+    bvid: detail?.bvid || bvid,
+    aid: detail?.aid || 0,
+    cid,
+    title: detail?.title || '',
+    artist: detail?.owner.name || '',
+    coverUrl: toHttpsUrl(detail?.pic || ''),
+    duration: page?.duration || detail?.duration || 0,
+    audioUrl,
+    audioQuality: bestAudio.quality,
+    audioMimeType: bestAudio.mimeType,
+  }
+}
+
 export async function extractAudioFromVideo(
   bvid: string,
   fallback?: { aid?: string | number; cid?: string | number },
+  pageCid?: string | number,
 ): Promise<TrackSource> {
+  const hinted = Number(pageCid) || 0
+  // 分 P 已经知道 cid 时，播放地址不必等稿件详情。详情仍在后台写入简介缓存。
+  if (hinted > 0) {
+    const detailTask = getVideoDetail(bvid).catch(() => null)
+    try {
+      const playData = await getPlayUrl(bvid, hinted)
+      return sourceFromPlay(bvid, hinted, playData, null)
+    } catch (playError) {
+      const detail = await detailTask
+      if (detail && detail.cid && detail.cid !== hinted) {
+        try {
+          return sourceFromPlay(detail.bvid || bvid, detail.cid, await getPlayUrl(bvid, detail.cid), detail)
+        } catch {
+          // 正确分 P 也没有音频时，再走下面的回退。
+        }
+      }
+      if (fallback?.aid && fallback?.cid) return extractAudioByAvidCid(fallback.aid, fallback.cid, bvid)
+      throw playError
+    }
+  }
   try {
     const detail = await getVideoDetail(bvid)
-    const playData = await getPlayUrl(bvid, detail.cid)
-    const audioUrl = getBestAudioUrl(playData)
-
-    const bestAudio = [...playData.dash.audio].sort((a, b) => b.bandwidth - a.bandwidth)[0]
-
-    return {
-      bvid: detail.bvid,
-      aid: detail.aid,
-      cid: detail.cid,
-      title: detail.title,
-      artist: detail.owner.name,
-      coverUrl: toHttpsUrl(detail.pic),
-      duration: detail.duration,
-      audioUrl,
-      audioQuality: bestAudio.quality,
-      audioMimeType: bestAudio.mimeType,
-    }
+    const cid = detail.cid
+    return sourceFromPlay(detail.bvid || bvid, cid, await getPlayUrl(bvid, cid), detail)
   } catch (e) {
     if (fallback?.aid && fallback?.cid) {
       return extractAudioByAvidCid(fallback.aid, fallback.cid, bvid)
@@ -693,6 +751,7 @@ async function extractAudioByAvidCid(
   const playData = await biliFetch<PlayUrlData>('/x/player/playurl', {
     params: { avid: aid, cid, qn: 0, fnver: 0, fnval: 16, fourk: 1 },
   })
+  rememberSmallVideo(bvid, Number(cid) || 0, playData.dash?.video)
   const audioStreams = playData.dash?.audio
   if (!audioStreams?.length) throw new Error('No audio stream available')
   const bestAudio = [...audioStreams].sort((a, b) => b.bandwidth - a.bandwidth)[0]
@@ -709,6 +768,10 @@ async function extractAudioByAvidCid(
     audioQuality: bestAudio.quality,
     audioMimeType: bestAudio.mimeType,
   }
+}
+
+export async function canPlayByAvidCid(aid: string | number, cid: string | number): Promise<void> {
+  await extractAudioByAvidCid(aid, cid)
 }
 
 // ===== 扫码登录 =====

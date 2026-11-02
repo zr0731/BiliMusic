@@ -5,7 +5,12 @@ import TitleBar from './TitleBar'
 import Sidebar from './Sidebar'
 import PlayerBar from './PlayerBar'
 import NowPlaying from '@/components/NowPlaying'
+import { UnavailableAutoCheck } from '@/components/UnavailableTracks'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+
+function PageFallback() {
+  return <TrackSkeleton />
+}
 
 export default function MainLayout() {
   return (
@@ -40,7 +45,7 @@ export default function MainLayout() {
           }}
         >
           <ErrorBoundary>
-            <Suspense fallback={<TrackSkeleton />}><Outlet /></Suspense>
+            <Suspense fallback={<PageFallback />}><Outlet /></Suspense>
           </ErrorBoundary>
         </main>
       </div>
@@ -48,6 +53,7 @@ export default function MainLayout() {
       <PlayerBar />
 
       <NowPlaying />
+      <UnavailableAutoCheck />
     </div>
   )
 }

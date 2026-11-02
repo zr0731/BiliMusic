@@ -1,5 +1,5 @@
 import { clampLyricBounds } from './lyricGeometry'
-import { app, BrowserWindow, Tray, ipcMain, nativeImage, net, protocol, screen, session, shell, dialog, globalShortcut } from 'electron'
+import { app, BrowserWindow, Tray, ipcMain, nativeImage, nativeTheme, net, protocol, screen, session, shell, dialog, globalShortcut } from 'electron'
 import { createHash } from 'node:crypto'
 import fs from 'fs'
 import path from 'path'
@@ -8,7 +8,9 @@ import { registerBiliApiHandlers, initializeBiliAuth } from './biliApi'
 import { registerLyricsApiHandlers } from './lyricsApi'
 import { initUpdates, getActiveRendererRoot } from './updater'
 import { registerWebdavHandlers } from './webdav'
-import { registerPlaylistImportHandlers } from './playlistImportApi'
+import { registerVideoWindow } from './videoWindow'
+import { registerLoudnessHandlers } from './loudness'
+import { registerSystemFontHandlers } from './systemFonts'
 
 import { assertTrustedSender, grantDirectory, downloadDirectory, validateAbsolutePath, isWithin } from './security'
 
@@ -62,7 +64,14 @@ if (debugEnabled) {
   app.commandLine.removeSwitch('remote-debugging-pipe')
   app.commandLine.removeSwitch('remote-allow-origins')
 }
-app.on('will-quit', () => globalShortcut.unregisterAll())
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      try { win.webContents.session.flushStorageData() } catch { /* ignore */ }
+    }
+  }
+})
 
 // B站请求头处理
 //
@@ -512,6 +521,7 @@ export interface DesktopLyricState {
   isPlaying: boolean
   hasTrack: boolean
   locked: boolean
+  hold: boolean
   style: Record<string, string | number | boolean>
 }
 
@@ -521,7 +531,8 @@ let lyricState: DesktopLyricState = {
   nextLine: '',
   isPlaying: false,
   hasTrack: false,
-  locked: true,
+  locked: false,
+  hold: false,
   style: {},
 }
 
@@ -538,6 +549,7 @@ function getLyricHtml() {
       -webkit-font-smoothing: antialiased;
     }
     #root {
+      position: relative;
       width: 100vw;
       height: 100vh;
       display: flex;
@@ -559,17 +571,29 @@ function getLyricHtml() {
       touch-action: none;
       min-width: 0;
     }
-    #dragBar {
-      position: absolute; top: 4px; right: 8px; z-index: 2;
-      padding: 3px 8px; border-radius: 8px;
-      background: rgba(0,0,0,.6); color: rgba(255,255,255,.8);
-      font-size: 10px; pointer-events: none;
-      opacity: 0; transition: opacity .15s;
+    #tools {
+      position: absolute; top: 2px; left: 50%; transform: translateX(-50%); z-index: 5;
+      display: flex; align-items: center; gap: 2px; white-space: nowrap;
+      padding: 2px 4px; border-radius: 8px;
+      background: rgba(0,0,0,.6); color: rgba(255,255,255,.9);
+      font-size: 11px; opacity: 0; transition: opacity .15s;
     }
-    body.unlocked.hint #dragBar { opacity: 1; }
+    #tools button {
+      border: 0; background: transparent; color: inherit; font: inherit;
+      cursor: pointer; padding: 2px 6px; border-radius: 6px;
+    }
+    #tools button:hover { background: rgba(255,255,255,.16); }
+    body.unlocked:hover #tools, body.unlocked.hint #tools { opacity: 1; }
+    body.dragging #tools, body.resizing #tools { opacity: 0; pointer-events: none; }
     body.unlocked #root { cursor: grab; touch-action: none; }
     body.dragging #root { cursor: grabbing; }
-    body.dragging #dragBar { opacity: 0; }
+    .resize {
+      position: absolute; top: 0; bottom: 0; width: 14px; z-index: 4; cursor: ew-resize;
+    }
+    body.unlocked:hover .resize { background: rgba(255,255,255,.16); }
+    #resizeL { left: 0; }
+    #resizeR { right: 0; }
+    body:not(.unlocked) #tools, body:not(.unlocked) .resize { display: none; }
     .lyric-box {
       width: 100%;
       min-width: 0;
@@ -579,9 +603,24 @@ function getLyricHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .line { display: block; width: 100%; max-width: 100%; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 2px 12px rgba(0,0,0,.65); }
+    .viewport { height: 1.35em; overflow: hidden; width: 100%; }
+    #roll { display: flex; flex-direction: column; will-change: transform; }
+    .line { display: block; width: 100%; max-width: 100%; height: 1.35em; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .line.preview { opacity: .65; }
-    .line.next { opacity: .55; font-size: .72em; margin-top: 2px; }
+    #unlock { display: none; }
+    body.locked #tools {
+      display: flex; opacity: 1; pointer-events: none;
+      padding: 0; background: transparent;
+    }
+    body.locked #unlock {
+      display: inline; pointer-events: auto;
+      padding: 3px 8px; border-radius: 8px; background: rgba(0,0,0,.55);
+    }
+    body.locked #lock,
+    body.locked #smaller,
+    body.locked #larger,
+    body.locked #dismiss,
+    body.locked #tools span { display: none; }
     body.unlocked .lyric-box {
       outline: 1px dashed rgba(255, 255, 255, .4);
       outline-offset: -1px;
@@ -591,18 +630,31 @@ function getLyricHtml() {
 </head>
 <body>
   <div id="root">
+    <div id="tools">
+      <button type="button" id="smaller" title="缩小字号">A-</button>
+      <button type="button" id="larger" title="放大字号">A+</button>
+        <button type="button" id="lock" title="锁定，鼠标穿透">锁定</button>
+        <button type="button" id="dismiss" title="关闭桌面歌词">关闭</button>
+        <button type="button" id="unlock" title="解除锁定">解锁</button>
+    </div>
     <div class="stack">
-      <div id="dragBar">按住歌词拖动 · 在设置中锁定</div>
       <div class="lyric-box">
-        <span class="line current" id="line"></span>
-        <span class="line next" id="nextLine"></span>
+        <div class="viewport">
+          <div id="roll">
+            <span class="line current" id="line"></span>
+            <span class="line current" id="incoming"></span>
+          </div>
+        </div>
       </div>
     </div>
+    <div id="resizeL" class="resize"></div>
+    <div id="resizeR" class="resize"></div>
   </div>
   <script>
     const ipcRenderer = window.auxiliaryIPC
     const lineEl = document.getElementById('line')
-    const nextEl = document.getElementById('nextLine')
+    const incomingEl = document.getElementById('incoming')
+    const rollEl = document.getElementById('roll')
     const dragTarget = document.getElementById('root')
 
     let style = {}
@@ -616,19 +668,18 @@ function getLyricHtml() {
       const box = document.querySelector('.lyric-box')
       const line = lineEl
       box.style.fontSize = Math.min(72, Math.max(16, Number(style.fontSize) || 28)) + 'px'
-      line.style.fontWeight = style.bold ? '800' : '600'
+      const safe = (value) => String(value || '').replace(/["\\\\<>]/g, '').slice(0, 80)
+      const cjk = safe(style.fontFamily) || 'Microsoft YaHei'
+      const latin = safe(style.latinFontFamily) || 'Times New Roman'
+      box.style.fontFamily = '"' + latin + '", "' + cjk + '", sans-serif'
+      line.style.fontWeight = style.bold ? '800' : '400'
       box.style.color = style.color || '#ff375f'
-      if (style.outline) {
-        const ow = style.outlineWidth || 2
-        const oc = style.outlineColor || 'rgba(0,0,0,.85)'
-        line.style.textShadow = [0,1,2,3,4,5,6,7,8].flatMap(dx =>
-          [0,1,2,3,4,5,6,7,8].map(dy =>
-            (dx*dx+dy*dy <= ow*ow && (dx||dy)) ? \`\${dx}px \${dy}px 0 \${oc}\` : []
-          )
-        ).filter(Boolean).join(',') + ', 0 2px 12px rgba(0,0,0,.4)'
-      } else {
-        line.style.textShadow = style.shadow === false ? 'none' : '0 2px 12px rgba(0,0,0,.5)'
-      }
+      const stroke = style.outline
+        ? ((Number(style.outlineWidth) || 2) + 'px ' + (style.outlineColor || 'rgba(0,0,0,.9)'))
+        : '0px transparent'
+      line.style.webkitTextStroke = stroke
+      line.style.paintOrder = 'stroke fill'
+      line.style.textShadow = style.outline ? 'none' : (style.shadow === false ? 'none' : '0 2px 10px rgba(0,0,0,.35)')
       if (style.showBg) {
         box.style.background = style.bgColor || 'rgba(0,0,0,.35)'
         box.style.padding = '8px 18px'
@@ -638,6 +689,47 @@ function getLyricHtml() {
         box.style.padding = '0'
         box.style.borderRadius = '0'
       }
+      if (incomingEl) {
+        incomingEl.style.fontWeight = line.style.fontWeight
+        incomingEl.style.webkitTextStroke = line.style.webkitTextStroke
+        incomingEl.style.paintOrder = 'stroke fill'
+        incomingEl.style.textShadow = line.style.textShadow
+      }
+    }
+
+    let shownLine = ''
+    let rollToken = 0
+    function showRollingLine(text, preview) {
+      const same = text === shownLine && lineEl.classList.contains('preview') === !!preview
+      if (same) return
+      const finishNow = (value) => {
+        shownLine = value
+        lineEl.textContent = value
+        lineEl.classList.toggle('preview', !!preview)
+        incomingEl.textContent = ''
+        rollEl.style.transition = 'none'
+        rollEl.style.transform = 'translateY(0)'
+      }
+      if (!shownLine || preview || lineEl.classList.contains('preview')) {
+        rollToken += 1
+        finishNow(text)
+        return
+      }
+      const token = ++rollToken
+      incomingEl.textContent = text
+      incomingEl.classList.toggle('preview', !!preview)
+      const distance = lineEl.offsetHeight || 32
+      rollEl.style.transition = 'transform .5s cubic-bezier(.22,1,.36,1)'
+      rollEl.style.transform = 'translateY(' + (-distance) + 'px)'
+      let settled = false
+      const finish = () => {
+        if (settled || token !== rollToken) return
+        settled = true
+        rollEl.removeEventListener('transitionend', finish)
+        finishNow(text)
+      }
+      rollEl.addEventListener('transitionend', finish)
+      setTimeout(finish, 560)
     }
 
     // Native cursor coordinates are sampled by the main process in DIP coordinates.
@@ -660,6 +752,7 @@ function getLyricHtml() {
     dragTarget.addEventListener('pointerleave', () => document.body.classList.remove('hint'))
     dragTarget.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || !document.body.classList.contains('unlocked')) return
+      if (e.target.closest && (e.target.closest('#tools button') || e.target.closest('.resize'))) return
       endDrag()
       dragging = true
       pointerId = e.pointerId
@@ -683,40 +776,94 @@ function getLyricHtml() {
     document.addEventListener('keydown', e => { if (e.key === 'Escape') endDrag() })
     ipcRenderer.on('desktop-lyrics:drag:ended', () => endDrag(false))
 
+    let resizing = false
+    let resizePointer = -1
+    let resizeTarget = null
+    let resizeHeartbeat = null
+    function endResize(notify) {
+      if (!resizing) return
+      resizing = false
+      clearInterval(resizeHeartbeat)
+      resizeHeartbeat = null
+      document.body.classList.remove('resizing')
+      try { if (resizeTarget && resizePointer >= 0) resizeTarget.releasePointerCapture(resizePointer) } catch (_) {}
+      resizePointer = -1
+      resizeTarget = null
+      if (notify !== false) ipcRenderer.send('desktop-lyrics:resize:end')
+    }
+    function startResize(edge, event) {
+      if (event.button !== 0 || !document.body.classList.contains('unlocked')) return
+      event.stopPropagation()
+      event.preventDefault()
+      endDrag(false)
+      endResize(false)
+      resizing = true
+      resizePointer = event.pointerId
+      resizeTarget = event.currentTarget
+      document.body.classList.add('resizing')
+      try { resizeTarget.setPointerCapture(resizePointer) } catch (_) { endResize(false); return }
+      ipcRenderer.send('desktop-lyrics:resize:start', edge)
+      resizeHeartbeat = setInterval(() => ipcRenderer.send('desktop-lyrics:resize:move'), 100)
+    }
+    document.getElementById('resizeL').addEventListener('pointerdown', (event) => startResize('left', event))
+    document.getElementById('resizeR').addEventListener('pointerdown', (event) => startResize('right', event))
+    window.addEventListener('pointermove', () => { if (resizing) ipcRenderer.send('desktop-lyrics:resize:move') })
+    window.addEventListener('pointerup', () => endResize(true))
+    window.addEventListener('pointercancel', () => endResize(true))
+    ipcRenderer.on('desktop-lyrics:resize:ended', () => endResize(false))
+    document.getElementById('tools').addEventListener('pointerdown', (event) => {
+      if (event.target.closest && event.target.closest('button')) event.stopPropagation()
+    })
+    document.getElementById('smaller').addEventListener('click', () => ipcRenderer.send('desktop-lyrics:adjust-font', -2))
+    document.getElementById('larger').addEventListener('click', () => ipcRenderer.send('desktop-lyrics:adjust-font', 2))
+    document.getElementById('lock').addEventListener('click', () => ipcRenderer.send('desktop-lyrics:set-lock', true))
+    document.getElementById('dismiss').addEventListener('click', () => ipcRenderer.send('desktop-lyrics:close'))
+    document.getElementById('unlock').addEventListener('click', () => ipcRenderer.send('desktop-lyrics:set-lock', false))
+    function pointerOnUnlock(event) {
+      const button = document.getElementById('unlock')
+      if (!button) return false
+      const box = button.getBoundingClientRect()
+      return event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom
+    }
+    window.addEventListener('mousemove', (event) => {
+      if (!document.body.classList.contains('locked')) return
+      const inside = pointerOnUnlock(event)
+      if (inside === document.body.classList.contains('hovering')) return
+      document.body.classList.toggle('hovering', inside)
+      ipcRenderer.send('desktop-lyrics:hover', inside)
+    })
+
     ipcRenderer.on('desktop-lyrics:state', (_e, s) => {
       if (!s) return
       if (s.style) applyStyle(s.style)
       const preview = !s.hasTrack || !s.line
-      lineEl.textContent = preview ? 'BiliMusic · 桌面歌词已就绪' : s.line
-      lineEl.classList.toggle('preview', preview)
-      nextEl.textContent = s.hasTrack ? s.nextLine || '' : ''
-      nextEl.style.display = s.hasTrack && s.nextLine ? 'block' : 'none'
-      if (s.locked || !s.visible) endDrag()
+      showRollingLine(preview ? 'BiliMusic · 桌面歌词已就绪' : s.line, preview)
+      if (s.locked || !s.visible) { endDrag(); endResize(false) }
       document.body.classList.toggle('unlocked', !s.locked)
       document.body.classList.toggle('locked', Boolean(s.locked))
+      if (!s.locked) document.body.classList.remove('hovering')
     })
 
     applyStyle({})
-    lineEl.textContent = 'BiliMusic · 桌面歌词已就绪'
-    lineEl.classList.add('preview')
-    nextEl.style.display = 'none'
+    showRollingLine('BiliMusic · 桌面歌词已就绪', true)
   </script>
 </body>
 </html>`
 }
 
-// 固定最大宽度，按字体和行数计算高度；短句切成长句时不会改变横向锚点。
+// 默认宽度，高度仍按字号和行数计算。用户拉宽后记住宽度，换行时不再把宽度打回 900。
 const LYRIC_W = 900
 const LYRIC_H = 140
 const LYRIC_BOUNDS_KEY = 'desktop_lyrics_position'
 
-function readLyricPosition(): { x: number; y: number } | null {
+function readLyricPosition(): { x: number; y: number; width?: number } | null {
   try {
     const raw = readPersistentStore()[LYRIC_BOUNDS_KEY]
     if (!raw) return null
     const p = JSON.parse(raw)
-    if (Number.isFinite(p?.x) && Number.isFinite(p?.y)) return { x: p.x, y: p.y }
-    return null
+    if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) return null
+    const width = Number.isFinite(p?.width) && p.width >= 280 ? p.width : undefined
+    return { x: p.x, y: p.y, width }
   } catch {
     return null
   }
@@ -726,17 +873,31 @@ function saveLyricPosition() {
   if (!lyricWindow || lyricWindow.isDestroyed()) return
   const b = lyricWindow.getBounds()
   const store = readPersistentStore()
-  store[LYRIC_BOUNDS_KEY] = JSON.stringify({ x: b.x, y: b.y })
+  store[LYRIC_BOUNDS_KEY] = JSON.stringify({ x: b.x, y: b.y, width: b.width })
   writePersistentStore(store)
 }
 
-// Keep the complete fixed-width text area visible, including on small/negative-origin displays.
-function clampLyricPosition(x: number, y: number, display = screen.getDisplayNearestPoint({
-  x: Math.round(x + LYRIC_W / 2), y: Math.round(y + LYRIC_H / 2),
-})): Electron.Rectangle {
+function resetLyricPosition() {
+  const store = readPersistentStore()
+  delete store[LYRIC_BOUNDS_KEY]
+  writePersistentStore(store)
+  if (!lyricWindow || lyricWindow.isDestroyed()) return
+  const { workArea } = screen.getPrimaryDisplay()
+  lyricWindow.setBounds(clampLyricPosition(
+    workArea.x + (workArea.width - LYRIC_W) / 2,
+    workArea.y + workArea.height - 160,
+    LYRIC_W,
+  ))
+}
+
+function clampLyricPosition(x: number, y: number, width = LYRIC_W, display?: Electron.Display): Electron.Rectangle {
+  const target = display ?? screen.getDisplayNearestPoint({
+    x: Math.round(x + width / 2), y: Math.round(y + LYRIC_H / 2),
+  })
   const font = Math.min(72, Math.max(16, Number(lyricState.style.fontSize) || 28))
-  const height = Math.min(display.workArea.height - 8, Math.ceil(font * 1.35 * (lyricState.nextLine ? 1.72 : 1) + (lyricState.style.showBg ? 18 : 2) + 8))
-  return clampLyricBounds(x, y, Math.min(LYRIC_W, display.workArea.width - 8), height, display.workArea)
+  const height = Math.min(target.workArea.height - 8, Math.ceil(font * 1.35 + (lyricState.style.showBg ? 18 : 2) + 36))
+  const nextWidth = Math.max(280, Math.min(width, target.workArea.width - 8))
+  return clampLyricBounds(x, y, nextWidth, height, target.bounds)
 }
 
 function createLyricWindow() {
@@ -771,20 +932,19 @@ function createLyricWindow() {
   lyricWindow.once('ready-to-show', () => {
     if (lyricState.visible) { showLyricWindow(); pushLyricState() }
   })
-  lyricWindow.on('blur', endLyricDrag)
-  lyricWindow.on('hide', endLyricDrag)
-  lyricWindow.webContents.on('render-process-gone', endLyricDrag)
-  lyricWindow.on('closed', () => { endLyricDrag(); lyricWindow = null })
+  lyricWindow.on('blur', endLyricPointer)
+  lyricWindow.on('hide', endLyricPointer)
+  lyricWindow.webContents.on('render-process-gone', endLyricPointer)
+  lyricWindow.on('closed', () => { endLyricPointer(); lyricWindow = null })
   return lyricWindow
 }
 
 function applyLyricLock() {
   if (!lyricWindow || lyricWindow.isDestroyed()) return
-  if (lyricState.locked) {
-    // 锁定 = 鼠标穿透，不挡桌面操作
+  if (lyricState.locked && !lyricPointerInside) {
+    // 锁定 = 鼠标穿透。移到歌词上时暂时接住鼠标，才能点到解锁。
     lyricWindow.setIgnoreMouseEvents(true, { forward: true })
   } else {
-    // 解锁 = 接收鼠标事件，由拖动条上的 pointer 事件驱动移动
     lyricWindow.setIgnoreMouseEvents(false)
   }
 }
@@ -798,7 +958,7 @@ function showLyricWindow() {
       x: workArea.x + (workArea.width - LYRIC_W) / 2,
       y: workArea.y + workArea.height - LYRIC_H - 120,
     }
-    const target = clampLyricPosition(saved?.x ?? fallback.x, saved?.y ?? fallback.y)
+    const target = clampLyricPosition(saved?.x ?? fallback.x, saved?.y ?? fallback.y, saved?.width)
     // 完整约束尺寸与位置，小屏也不会越界
     win.setBounds(target)
     win.showInactive()
@@ -807,22 +967,32 @@ function showLyricWindow() {
 }
 
 function hideLyricWindow() {
+  saveLyricPosition()
   lyricWindow?.hide()
 }
 
 function pushLyricState() {
   if (!lyricWindow || lyricWindow.isDestroyed()) return
-  if (!lyricDragging) {
+  if (!lyricDragging && !lyricResizing) {
     const bounds = lyricWindow.getBounds()
-    lyricWindow.setBounds(clampLyricPosition(bounds.x, bounds.y, screen.getDisplayMatching(bounds)))
+    lyricWindow.setBounds(clampLyricPosition(bounds.x, bounds.y, bounds.width, screen.getDisplayMatching(bounds)))
   }
   lyricWindow.webContents.send('desktop-lyrics:state', lyricState)
 }
 
 // ===== Drag from an immutable native cursor/window origin, never accumulated deltas =====
 let lyricDragging = false
+let lyricResizing = false
+let lyricPointerInside = false
 let lyricDragOrigin: { cursor: Electron.Point; bounds: Electron.Rectangle } | null = null
+let lyricResizeOrigin: { cursor: Electron.Point; bounds: Electron.Rectangle; edge: 'left' | 'right' } | null = null
 let lyricDragTimer: ReturnType<typeof setTimeout> | null = null
+let lyricResizeTimer: ReturnType<typeof setTimeout> | null = null
+
+function endLyricPointer() {
+  endLyricDrag()
+  endLyricResize()
+}
 
 function endLyricDrag() {
   if (!lyricDragging) return
@@ -839,6 +1009,7 @@ function armLyricDragTimeout() {
 }
 ipcMain.on('desktop-lyrics:drag:start', event => {
   if (!lyricWindow || lyricWindow.isDestroyed() || event.sender !== lyricWindow.webContents || lyricState.locked) return
+  endLyricResize()
   lyricDragOrigin = { cursor: screen.getCursorScreenPoint(), bounds: lyricWindow.getBounds() }
   lyricDragging = true
   armLyricDragTimeout()
@@ -848,7 +1019,7 @@ ipcMain.on('desktop-lyrics:drag:move', event => {
   if (!lyricDragging || !lyricDragOrigin || lyricState.locked) return
   const cursor = screen.getCursorScreenPoint()
   const { bounds, cursor: start } = lyricDragOrigin
-  const next = clampLyricPosition(bounds.x + cursor.x - start.x, bounds.y + cursor.y - start.y, screen.getDisplayNearestPoint(cursor))
+  const next = clampLyricPosition(bounds.x + cursor.x - start.x, bounds.y + cursor.y - start.y, bounds.width, screen.getDisplayNearestPoint(cursor))
   lyricWindow.setBounds(next)
   armLyricDragTimeout()
 })
@@ -856,28 +1027,108 @@ ipcMain.on('desktop-lyrics:drag:end', event => {
   if (event.sender === lyricWindow?.webContents) endLyricDrag()
 })
 
+function endLyricResize() {
+  if (!lyricResizing) return
+  lyricResizing = false
+  lyricResizeOrigin = null
+  if (lyricResizeTimer) { clearTimeout(lyricResizeTimer); lyricResizeTimer = null }
+  if (lyricWindow && !lyricWindow.isDestroyed()) lyricWindow.webContents.send('desktop-lyrics:resize:ended')
+  saveLyricPosition()
+}
+function armLyricResizeTimeout() {
+  if (lyricResizeTimer) clearTimeout(lyricResizeTimer)
+  lyricResizeTimer = setTimeout(endLyricResize, 1000)
+}
+ipcMain.on('desktop-lyrics:resize:start', (event, edge: unknown) => {
+  if (!lyricWindow || lyricWindow.isDestroyed() || event.sender !== lyricWindow.webContents || lyricState.locked) return
+  if (edge !== 'left' && edge !== 'right') return
+  endLyricDrag()
+  lyricResizeOrigin = { cursor: screen.getCursorScreenPoint(), bounds: lyricWindow.getBounds(), edge }
+  lyricResizing = true
+  armLyricResizeTimeout()
+})
+ipcMain.on('desktop-lyrics:resize:move', event => {
+  if (!lyricWindow || lyricWindow.isDestroyed() || event.sender !== lyricWindow.webContents) return
+  if (!lyricResizing || !lyricResizeOrigin || lyricState.locked) return
+  const cursor = screen.getCursorScreenPoint()
+  const { bounds, cursor: start, edge } = lyricResizeOrigin
+  const dx = cursor.x - start.x
+  const width = Math.max(280, edge === 'right' ? bounds.width + dx : bounds.width - dx)
+  const x = edge === 'left' ? bounds.x + (bounds.width - width) : bounds.x
+  lyricWindow.setBounds(clampLyricPosition(x, bounds.y, width, screen.getDisplayNearestPoint(cursor)))
+  armLyricResizeTimeout()
+})
+ipcMain.on('desktop-lyrics:resize:end', event => {
+  if (event.sender === lyricWindow?.webContents) endLyricResize()
+})
+ipcMain.on('desktop-lyrics:adjust-font', (event, delta: unknown) => {
+  if (!lyricWindow || lyricWindow.isDestroyed() || event.sender !== lyricWindow.webContents || lyricState.locked) return
+  const step = Number(delta)
+  if (!Number.isFinite(step) || step === 0 || Math.abs(step) > 8) return
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('desktop-lyrics:adjust-font', step)
+})
+ipcMain.on('desktop-lyrics:close', (event) => {
+  if (!lyricWindow || lyricWindow.isDestroyed() || event.sender !== lyricWindow.webContents) return
+  lyricState.visible = false
+  hideLyricWindow()
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('desktop-lyrics:close-request')
+})
+ipcMain.on('desktop-lyrics:set-lock', (event, locked: unknown) => {
+  if (!lyricWindow || lyricWindow.isDestroyed() || event.sender !== lyricWindow.webContents) return
+  lyricState.locked = Boolean(locked)
+  if (!lyricState.locked) lyricPointerInside = false
+  if (lyricState.locked) endLyricPointer()
+  applyLyricLock()
+  pushLyricState()
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('desktop-lyrics:lock-changed', lyricState.locked)
+})
+ipcMain.on('desktop-lyrics:hover', (event, inside: unknown) => {
+  if (!lyricWindow || lyricWindow.isDestroyed() || event.sender !== lyricWindow.webContents || !lyricState.locked) return
+  lyricPointerInside = inside === true
+  applyLyricLock()
+})
+
 // 桌面歌词 IPC
+function mainWindowInBackground(): boolean {
+  if (!mainWindow || mainWindow.isDestroyed()) return true
+  if (mainWindow.isMinimized() || !mainWindow.isVisible()) return true
+  return BrowserWindow.getFocusedWindow() !== mainWindow
+}
+
+function lyricShouldShow(): boolean {
+  if (!lyricState.visible) return false
+  if (!lyricState.hold) return true
+  return mainWindowInBackground()
+}
+
+function applyLyricVisibility() {
+  const showing = Boolean(lyricWindow && !lyricWindow.isDestroyed() && lyricWindow.isVisible())
+  if (!lyricShouldShow()) {
+    if (showing) {
+      endLyricPointer()
+      hideLyricWindow()
+    }
+    return
+  }
+  showLyricWindow()
+  applyLyricLock()
+  pushLyricState()
+}
+
 ipcMain.on('desktop-lyrics:set-state', (_event, patch: Partial<DesktopLyricState>) => {
   if (!patch || typeof patch !== 'object') return
-  const prevVisible = lyricState.visible
   const prevLocked = lyricState.locked
-  lyricState = { ...lyricState, ...patch }
-  // 重新锁定或隐藏时，强制结束可能残留的拖动态
-  if ((lyricState.locked && !prevLocked) || !lyricState.visible) endLyricDrag()
-  if (lyricState.visible && !prevVisible) showLyricWindow()
-  if (!lyricState.visible && prevVisible) hideLyricWindow()
-  if (lyricState.visible) {
-    createLyricWindow() // 隐藏时窗口可能尚未创建，先确保存在
-    applyLyricLock()
-    pushLyricState()
-  }
+  lyricState = { ...lyricState, ...patch, hold: patch.hold === true }
+  if ((lyricState.locked && !prevLocked) || !lyricShouldShow()) endLyricPointer()
+  applyLyricVisibility()
 })
 
 ipcMain.on('desktop-lyrics:toggle-lock', () => {
   lyricState.locked = !lyricState.locked
-  if (lyricState.locked) endLyricDrag()
+  if (lyricState.locked) endLyricPointer()
   applyLyricLock()
   pushLyricState()
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('desktop-lyrics:lock-changed', lyricState.locked)
 })
 
 
@@ -909,7 +1160,7 @@ function createWindow() {
     maximizable: true,
     closable: true,
     ...(!isHarmonyOS ? { titleBarStyle: 'hidden' as const } : {}),
-    backgroundColor: '#F6F7F9',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#17181A' : '#F6F7F9',
     icon: loadAppIcon(),
     webPreferences: {
       preload: process.env.VITE_DEV_SERVER_URL
@@ -951,6 +1202,19 @@ function createWindow() {
   const sendFullscreenState = () => {
     mainWindow?.webContents.send('window:fullscreen-change', Boolean(mainWindow?.isFullScreen()))
   }
+  const refreshLyrics = () => { setTimeout(applyLyricVisibility, 40) }
+  mainWindow.on('minimize', () => {
+    mainWindow?.webContents.send('window:minimized-change', true)
+    refreshLyrics()
+  })
+  mainWindow.on('restore', () => {
+    mainWindow?.webContents.send('window:minimized-change', false)
+    refreshLyrics()
+  })
+  mainWindow.on('blur', refreshLyrics)
+  mainWindow.on('focus', refreshLyrics)
+  mainWindow.on('hide', refreshLyrics)
+  mainWindow.on('show', refreshLyrics)
   mainWindow.on('maximize', sendMaximizeState)
   mainWindow.on('unmaximize', sendMaximizeState)
   mainWindow.on('enter-full-screen', () => {
@@ -964,6 +1228,29 @@ function createWindow() {
 }
 
 // 窗口控制 IPC
+ipcMain.on('theme:prefers-dark', (event) => { event.returnValue = nativeTheme.shouldUseDarkColors })
+ipcMain.on('settings:small-window-quality:get', (event) => {
+  const value = readPersistentStore().small_window_quality
+  event.returnValue = value === '720' || value === '1080' || value === '480' ? value : ''
+})
+ipcMain.on('settings:small-window-quality:set', (event, value: unknown) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return
+  if (value !== '480' && value !== '720' && value !== '1080') return
+  const store = readPersistentStore()
+  store.small_window_quality = value
+  writePersistentStore(store)
+})
+nativeTheme.on('updated', () => {
+  const dark = nativeTheme.shouldUseDarkColors
+  mainWindow?.setBackgroundColor(dark ? '#17181A' : '#F6F7F9')
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('theme:system', dark)
+})
+ipcMain.on('desktop-lyrics:reset', (event) => {
+  const fromLyric = Boolean(lyricWindow && !lyricWindow.isDestroyed() && event.sender === lyricWindow.webContents)
+  const fromMain = Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents)
+  if (!fromLyric && !fromMain) return
+  resetLyricPosition()
+})
 ipcMain.on('window:minimize', () => mainWindow?.minimize())
 ipcMain.on('window:maximize', () => {
   if (mainWindow?.isMaximized()) {
@@ -1014,11 +1301,16 @@ ipcMain.on('persistent-storage:get', (event, key: string) => {
   }
   event.returnValue = readPersistentStore()[key] ?? null
 })
-ipcMain.on('persistent-storage:set', (_event, key: string, value: string) => {
-  if (typeof key !== 'string' || typeof value !== 'string') return
+ipcMain.on('persistent-storage:set', (event, key: string, value: string) => {
+  if (typeof key !== 'string' || typeof value !== 'string') {
+    event.returnValue = false
+    return
+  }
   const store = readPersistentStore()
   store[key] = value
   writePersistentStore(store)
+  try { event.sender.session.flushStorageData() } catch { /* 关闭过程中会话可能已经销毁 */ }
+  event.returnValue = true
 })
 ipcMain.on('persistent-storage:remove', (_event, key: string) => {
   if (typeof key !== 'string') return
@@ -1093,10 +1385,18 @@ app.whenReady().then(async () => {
     if (!globalShortcut.register(key, () => sendTrayCommand(command))) console.warn(`[Media] ${key} unavailable; MediaSession fallback remains active`)
   }
   setupBiliHeaders()
+  registerVideoWindow({
+    preload: path.join(__dirname, process.env.VITE_DEV_SERVER_URL ? '../electron/auxiliary-preload.cjs' : 'auxiliary-preload.cjs'),
+    mainWindow: () => mainWindow,
+    onAbove: () => {
+      if (lyricWindow && !lyricWindow.isDestroyed() && lyricWindow.isVisible()) lyricWindow.moveTop()
+    },
+  })
   registerBiliApiHandlers()
   registerLyricsApiHandlers()
   registerWebdavHandlers()
-  registerPlaylistImportHandlers()
+  registerLoudnessHandlers()
+  registerSystemFontHandlers()
   // 更新模块须在创建窗口前初始化：bootReconcile 先定下生效的渲染层根目录，供 app:// 加载
   initUpdates({
     window: () => mainWindow,

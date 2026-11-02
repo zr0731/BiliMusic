@@ -11,7 +11,7 @@
     ·
     <a href="#-harmonyos-pc">HarmonyOS PC</a>
     ·
-    <a href="https://github.com/Withnoidea/BiliMusic">GitHub</a>
+    <a href="https://github.com/zr0731/BiliMusic">GitHub</a>
   </p>
   <p>
     <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=111" />
@@ -23,6 +23,8 @@
 </div>
 
 <br />
+
+> This fork targets Windows 10/11 only. The HarmonyOS project, macOS targets, and Linux targets described below were removed. To recover them, clone https://github.com/Withnoidea/BiliMusic at commit `73e6b12792a5fafe449345187926dedfeddf5023` and follow `docs/其他系统基线.md`.
 
 <div align="center">
   <table>
@@ -517,9 +519,9 @@ Designed and built by MikannQAQ.
 
 ## Fork repository and updates
 
-This fork is maintained at [Withnoidea/BiliMusic](https://github.com/Withnoidea/BiliMusic).
-Use its [Releases](https://github.com/Withnoidea/BiliMusic/releases) and
-[Issues](https://github.com/Withnoidea/BiliMusic/issues), not upstream releases.
+This fork is maintained at [zr0731/BiliMusic](https://github.com/zr0731/BiliMusic).
+Use its [Releases](https://github.com/zr0731/BiliMusic/releases) and
+[Issues](https://github.com/zr0731/BiliMusic/issues), not upstream releases.
 Original project credit: [HanversionOvO/BiliMusic](https://github.com/HanversionOvO/BiliMusic).
 
 The app checks only this fork. A fork with no public stable Release shows an explicit

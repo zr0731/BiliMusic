@@ -1,5 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
+function paintBootTheme() {
+  let mode = 'system'
+  try { mode = localStorage.getItem('theme-mode') || 'system' } catch (error) {}
+  let dark = false
+  try { dark = ipcRenderer.sendSync('theme:prefers-dark') === true } catch (error) {}
+  const resolved = mode === 'light' || mode === 'dark' ? mode : (dark ? 'dark' : 'light')
+  document.documentElement.setAttribute('data-theme', resolved)
+  document.documentElement.style.backgroundColor = resolved === 'dark' ? '#17181A' : '#F6F7F9'
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', paintBootTheme)
+else paintBootTheme()
+
 console.log('[preload] Electron preload script starting...')
 
 const biliApi = {
@@ -79,8 +91,27 @@ const playlistApi = {
 
 const persistentStorage = {
   getItem: (key) => ipcRenderer.sendSync('persistent-storage:get', key),
-  setItem: (key, value) => ipcRenderer.send('persistent-storage:set', key, value),
+  setItem: (key, value) => ipcRenderer.sendSync('persistent-storage:set', key, value),
   removeItem: (key) => ipcRenderer.send('persistent-storage:remove', key),
+}
+
+const videoWindow = {
+  setState: (patch) => ipcRenderer.send('video-window:set-state', patch),
+  onClosed: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('video-window:closed', listener)
+    return () => ipcRenderer.removeListener('video-window:closed', listener)
+  },
+  onCommand: (callback) => {
+    const listener = (_event, command) => callback(command)
+    ipcRenderer.on('video-window:command', listener)
+    return () => ipcRenderer.removeListener('video-window:command', listener)
+  },
+  onPictureFailed: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('video-window:picture-failed', listener)
+    return () => ipcRenderer.removeListener('video-window:picture-failed', listener)
+  },
 }
 
 const desktopLyrics = {
@@ -88,10 +119,44 @@ const desktopLyrics = {
   setState: (patch) => ipcRenderer.send('desktop-lyrics:set-state', patch),
   // 解锁/锁定切换（锁定 = 鼠标穿透）
   toggleLock: () => ipcRenderer.send('desktop-lyrics:toggle-lock'),
+  resetPosition: () => ipcRenderer.send('desktop-lyrics:reset'),
+  onAdjustFont: (callback) => {
+    const listener = (_event, delta) => callback(Number(delta) || 0)
+    ipcRenderer.on('desktop-lyrics:adjust-font', listener)
+    return () => ipcRenderer.removeListener('desktop-lyrics:adjust-font', listener)
+  },
+  onLockChanged: (callback) => {
+    const listener = (_event, locked) => callback(Boolean(locked))
+    ipcRenderer.on('desktop-lyrics:lock-changed', listener)
+    return () => ipcRenderer.removeListener('desktop-lyrics:lock-changed', listener)
+  },
+  onClose: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('desktop-lyrics:close-request', listener)
+    return () => ipcRenderer.removeListener('desktop-lyrics:close-request', listener)
+  },
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
   minimize: () => ipcRenderer.send('window:minimize'),
+  onMinimizedChange: (callback) => {
+    const listener = (_event, minimized) => callback(Boolean(minimized))
+    ipcRenderer.on('window:minimized-change', listener)
+    return () => ipcRenderer.removeListener('window:minimized-change', listener)
+  },
+  systemPrefersDark: () => ipcRenderer.sendSync('theme:prefers-dark') === true,
+  getSmallWindowQuality: () => {
+    const value = ipcRenderer.sendSync('settings:small-window-quality:get')
+    return value === '720' || value === '1080' || value === '480' ? value : ''
+  },
+  setSmallWindowQuality: (value) => ipcRenderer.send('settings:small-window-quality:set', value),
+  onSystemTheme: (callback) => {
+    const listener = (_event, dark) => callback(Boolean(dark))
+    ipcRenderer.on('theme:system', listener)
+    return () => ipcRenderer.removeListener('theme:system', listener)
+  },
+  listSystemFonts: () => ipcRenderer.invoke('system:fonts'),
+  measureLoudness: (url) => ipcRenderer.invoke('audio:loudness', url),
   maximize: () => ipcRenderer.send('window:maximize'),
   close: () => ipcRenderer.send('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
@@ -136,6 +201,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   persistentStorage,
   desktopLyrics,
+  videoWindow,
   biliApi,
   lyricsApi,
   playlistApi,

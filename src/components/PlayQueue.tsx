@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   X,
@@ -15,12 +15,36 @@ import { usePlayer } from '@/contexts/PlayerContext'
 import { useAddToPlaylist } from '@/contexts/AddToPlaylistContext'
 import type { Track } from '@/types'
 
+const ROW_HEIGHT = 58
 const panelSpring = {
   type: 'spring',
   stiffness: 330,
   damping: 28,
   mass: 0.8,
 } as const
+
+function useQueueWindow(count: number) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [range, setRange] = useState({ start: 0, end: 18 })
+  useEffect(() => {
+    const scroller = ref.current
+    if (!scroller) return
+    const update = () => {
+      const start = Math.max(0, Math.floor(scroller.scrollTop / ROW_HEIGHT) - 4)
+      const end = Math.min(count, Math.ceil((scroller.scrollTop + scroller.clientHeight) / ROW_HEIGHT) + 6)
+      setRange(previous => previous.start === start && previous.end === end ? previous : { start, end: Math.max(end, start + 1) })
+    }
+    update()
+    scroller.addEventListener('scroll', update, { passive: true })
+    const observer = new ResizeObserver(update)
+    observer.observe(scroller)
+    return () => {
+      scroller.removeEventListener('scroll', update)
+      observer.disconnect()
+    }
+  }, [count])
+  return { ref, start: range.start, end: range.end }
+}
 
 export default function PlayQueue({ open, onClose }: { open: boolean; onClose: () => void }) {
   const player = usePlayer()
@@ -29,8 +53,8 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [overIndex, setOverIndex] = useState<number | null>(null)
-
   const queue = player.queue
+  const windowed = useQueueWindow(open ? queue.length : 0)
   const currentId = player.currentTrack?.id
   const selectableIds = queue.filter(t => t.id !== currentId).map(t => t.id)
   const allSelected = selectableIds.length > 0 && selectableIds.every(id => selected.has(id))
@@ -66,13 +90,37 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
     exitSelect()
   }
 
-  const onDrop = (toIndex: number) => {
-    if (dragIndex !== null && dragIndex !== toIndex) {
-      player.moveInQueue(dragIndex, toIndex)
+  const indexAt = (event: DragEvent<HTMLDivElement>) => {
+    const scroller = windowed.ref.current
+    if (!scroller || queue.length === 0) return 0
+    const rect = scroller.getBoundingClientRect()
+    const y = scroller.scrollTop + event.clientY - rect.top - 8
+    return Math.min(queue.length - 1, Math.max(0, Math.floor(y / ROW_HEIGHT)))
+  }
+
+  const onListDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (dragIndex === null) return
+    event.preventDefault()
+    const scroller = windowed.ref.current
+    if (scroller) {
+      const rect = scroller.getBoundingClientRect()
+      const edge = event.clientY - rect.top
+      if (edge < 36) scroller.scrollTop -= 14
+      else if (edge > rect.height - 36) scroller.scrollTop += 14
     }
+    const index = indexAt(event)
+    setOverIndex(previous => previous === index ? previous : index)
+  }
+
+  const onListDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const toIndex = overIndex ?? indexAt(event)
+    if (dragIndex !== null && dragIndex !== toIndex) player.moveInQueue(dragIndex, toIndex)
     setDragIndex(null)
     setOverIndex(null)
   }
+
+  const visible = queue.slice(windowed.start, windowed.end)
 
   return (
     <AnimatePresence>
@@ -83,12 +131,7 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            style={{
-              position: 'fixed',
-              inset: 0,
-              zIndex: 60,
-              background: 'transparent',
-            }}
+            style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'transparent' }}
           />
 
           <motion.div
@@ -108,14 +151,11 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
               flexDirection: 'column',
               borderRadius: 18,
               background: 'var(--queue-bg)',
-              backdropFilter: 'blur(34px) saturate(175%)',
-              WebkitBackdropFilter: 'blur(34px) saturate(175%)',
               border: '1px solid var(--queue-border)',
               boxShadow: 'var(--queue-shadow)',
               overflow: 'hidden',
               color: 'var(--queue-text)',
-              fontFamily:
-                "'SF Pro Display', '-apple-system', BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif",
+              fontFamily: "'SF Pro Display', '-apple-system', BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif",
             } as CSSProperties}
           >
             <div
@@ -130,39 +170,16 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
               }}
             >
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, minWidth: 0 }}>
-                <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--queue-text)' }}>
-                  播放队列
-                </span>
-                <span
-                  style={{
-                    color: 'var(--queue-text-3)',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    fontVariantNumeric: 'tabular-nums',
-                  }}
-                >
+                <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--queue-text)' }}>播放队列</span>
+                <span style={{ color: 'var(--queue-text-3)', fontSize: 11, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                   {queue.length} 首歌曲
                 </span>
               </div>
-
               <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                <IconButton
-                  title={selecting ? '退出多选' : '多选'}
-                  active={selecting}
-                  disabled={queue.length === 0}
-                  onClick={toggleSelectMode}
-                >
+                <IconButton title={selecting ? '退出多选' : '多选'} active={selecting} disabled={queue.length === 0} onClick={toggleSelectMode}>
                   <ListChecks size={17} />
                 </IconButton>
-                <IconButton
-                  title="清空队列"
-                  disabled={queue.length === 0}
-                  danger
-                  onClick={() => {
-                    player.clearQueue()
-                    exitSelect()
-                  }}
-                >
+                <IconButton title="清空队列" disabled={queue.length === 0} danger onClick={() => { player.clearQueue(); exitSelect() }}>
                   <Trash2 size={17} />
                 </IconButton>
                 <div style={{ width: 1, height: 16, background: 'var(--queue-divider)', margin: '0 3px' }} />
@@ -173,32 +190,24 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
             </div>
 
             <div
+              ref={windowed.ref}
               className="sidebar-scroll"
-              style={{
-                flex: 1,
-                overflowY: 'auto',
-                padding: 8,
-              }}
+              onDragOver={onListDragOver}
+              onDrop={onListDrop}
+              style={{ flex: 1, overflowY: 'auto', padding: 8 }}
             >
               {queue.length === 0 ? (
                 <EmptyQueue />
               ) : (
-                <AnimatePresence initial={false}>
-                  {queue.map((track, index) => (
-                    <motion.div
-                      key={track.id}
-                      layout
-                      initial={{ opacity: 0, height: 0, y: 6 }}
-                      animate={{ opacity: 1, height: 'auto', y: 0 }}
-                      exit={{ opacity: 0, height: 0, y: -4 }}
-                      transition={{
-                        opacity: { duration: 0.18 },
-                        height: { duration: 0.2 },
-                        layout: { type: 'spring', bounce: 0.16, duration: 0.45 },
-                      }}
-                    >
+                <div style={{ position: 'relative', height: queue.length * ROW_HEIGHT }}>
+                  {visible.map((track, offset) => {
+                    const index = windowed.start + offset
+                    return (
                       <QueueRow
+                        key={track.id}
                         track={track}
+                        index={index}
+                        top={index * ROW_HEIGHT}
                         isCurrent={track.id === currentId}
                         isPlaying={track.id === currentId && player.isPlaying}
                         selecting={selecting}
@@ -210,16 +219,11 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
                         onAddToPlaylist={() => openAddToPlaylist(track)}
                         onRemove={() => player.removeFromQueue(track.id)}
                         onDragStart={() => setDragIndex(index)}
-                        onDragOver={() => setOverIndex(index)}
-                        onDrop={() => onDrop(index)}
-                        onDragEnd={() => {
-                          setDragIndex(null)
-                          setOverIndex(null)
-                        }}
+                        onDragEnd={() => { setDragIndex(null); setOverIndex(null) }}
                       />
-                    </motion.div>
-                  ))}
-                </AnimatePresence>
+                    )
+                  })}
+                </div>
               )}
             </div>
 
@@ -244,21 +248,13 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
                   <TextButton onClick={toggleSelectAll} disabled={selectableIds.length === 0}>
                     {allSelected ? '取消全选' : '全选'}
                   </TextButton>
-                  <span
-                    style={{
-                      color: 'var(--queue-text-3)',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      fontVariantNumeric: 'tabular-nums',
-                    }}
-                  >
+                  <span style={{ color: 'var(--queue-text-3)', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                     已选 {selected.size} 项
                   </span>
-                  <motion.button
+                  <button
                     type="button"
                     onClick={removeSelected}
                     disabled={selected.size === 0}
-                    whileTap={selected.size === 0 ? undefined : { scale: 0.95 }}
                     style={{
                       height: 30,
                       padding: '0 14px',
@@ -273,11 +269,10 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
                       fontWeight: 700,
                       cursor: selected.size === 0 ? 'not-allowed' : 'pointer',
                       fontFamily: 'inherit',
-                      boxShadow: selected.size === 0 ? 'none' : '0 10px 24px rgba(255, 55, 95, 0.22)',
                     }}
                   >
                     <Trash2 size={15} /> 移除
-                  </motion.button>
+                  </button>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -288,8 +283,10 @@ export default function PlayQueue({ open, onClose }: { open: boolean; onClose: (
   )
 }
 
-function QueueRow({
+const QueueRow = memo(function QueueRow({
   track,
+  index,
+  top,
   isCurrent,
   isPlaying,
   selecting,
@@ -301,11 +298,11 @@ function QueueRow({
   onAddToPlaylist,
   onRemove,
   onDragStart,
-  onDragOver,
-  onDrop,
   onDragEnd,
 }: {
   track: Track
+  index: number
+  top: number
   isCurrent: boolean
   isPlaying: boolean
   selecting: boolean
@@ -317,41 +314,37 @@ function QueueRow({
   onAddToPlaylist: () => void
   onRemove: () => void
   onDragStart: () => void
-  onDragOver: () => void
-  onDrop: () => void
   onDragEnd: () => void
 }) {
   const [hover, setHover] = useState(false)
-
   return (
-    <motion.div
+    <div
       draggable={!selecting}
-      onDragStart={onDragStart}
-      onDragOver={(e) => {
-        e.preventDefault()
-        onDragOver()
-      }}
-      onDrop={(e) => {
-        e.preventDefault()
-        onDrop()
+      onDragStart={(event) => {
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData('text/plain', String(index))
+        onDragStart()
       }}
       onDragEnd={onDragEnd}
       onClick={selecting ? onSelect : onPlay}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      whileHover={{ backgroundColor: selected || isCurrent ? 'var(--queue-row-hover-strong)' : 'var(--queue-row-hover)' }}
-      whileTap={{ scale: 0.992 }}
-      transition={{ duration: 0.16 }}
       style={{
-        position: 'relative',
+        position: 'absolute',
+        top,
+        left: 0,
+        right: 0,
+        height: ROW_HEIGHT,
         display: 'flex',
         alignItems: 'center',
         gap: 10,
-        minHeight: 58,
         padding: '8px 8px 8px 9px',
+        boxSizing: 'border-box',
         borderRadius: isDragOver ? 7 : 10,
-        background: selected || isCurrent ? 'var(--queue-row-active)' : 'transparent',
-        borderTop: isDragOver ? '2px solid #ff375f' : '2px solid transparent',
+        background: hover
+          ? (selected || isCurrent ? 'var(--queue-row-hover-strong)' : 'var(--queue-row-hover)')
+          : (selected || isCurrent ? 'var(--queue-row-active)' : 'transparent'),
+        boxShadow: isDragOver ? 'inset 0 2px 0 #ff375f' : undefined,
         cursor: 'pointer',
         overflow: 'hidden',
       }}
@@ -362,17 +355,11 @@ function QueueRow({
         ) : isCurrent ? (
           <Equalizer active={isPlaying} />
         ) : (
-          <motion.span
-            animate={{ opacity: hover ? 1 : 0, x: hover ? 0 : -2 }}
-            transition={{ duration: 0.16 }}
-            style={{ color: 'var(--queue-text-3)', display: 'flex', cursor: 'grab' }}
-            title="拖拽调整顺序"
-          >
+          <span style={{ color: 'var(--queue-text-3)', display: 'flex', cursor: 'grab', opacity: hover ? 1 : 0 }} title="拖拽调整顺序">
             <GripVertical size={16} />
-          </motion.span>
+          </span>
         )}
       </div>
-
       <div
         style={{
           width: 42,
@@ -383,129 +370,61 @@ function QueueRow({
           overflow: 'hidden',
           flexShrink: 0,
           position: 'relative',
-          boxShadow: '0 8px 18px rgba(0, 0, 0, 0.2)',
         }}
       >
         {track.coverUrl ? (
-          <img src={track.coverUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
+          <img src={track.coverUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" draggable={false} />
         ) : (
           <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Music size={16} style={{ color: 'var(--queue-text-3)' }} />
           </div>
         )}
-        <motion.div
-          animate={{ opacity: hover ? 1 : 0 }}
-          transition={{ duration: 0.16 }}
-          style={{
-            position: 'absolute',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.42)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          {!isCurrent && <Play size={16} fill="currentColor" style={{ color: '#fff', marginLeft: 1 }} />}
-        </motion.div>
+        {hover && !isCurrent && (
+          <div style={{ position: 'absolute', inset: 0, background: 'rgba(0, 0, 0, 0.42)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Play size={16} fill="currentColor" style={{ color: '#fff', marginLeft: 1 }} />
+          </div>
+        )}
       </div>
-
       <div style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
-        <div
-          style={{
-            color: isCurrent ? '#ff4f7a' : 'var(--queue-text)',
-            fontSize: 13,
-            fontWeight: isCurrent ? 700 : 600,
-            lineHeight: 1.25,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            transition: 'color 160ms ease',
-          }}
-        >
+        <div style={{ color: isCurrent ? '#ff4f7a' : 'var(--queue-text)', fontSize: 13, fontWeight: isCurrent ? 700 : 600, lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {track.title}
         </div>
-        <div
-          style={{
-            marginTop: 4,
-            color: hover ? 'var(--queue-text-2)' : 'var(--queue-text-3)',
-            fontSize: 12,
-            fontWeight: 500,
-            lineHeight: 1.2,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            transition: 'color 160ms ease',
-          }}
-        >
+        <div style={{ marginTop: 4, color: hover ? 'var(--queue-text-2)' : 'var(--queue-text-3)', fontSize: 12, fontWeight: 500, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {track.artist}
         </div>
       </div>
-
-      <AnimatePresence>
-        {!selecting && hover && (
-          <motion.div
-            initial={{ opacity: 0, x: 8 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 8 }}
-            transition={{ duration: 0.16 }}
-            style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0 }}
-          >
-            <IconButton
-              title="添加至歌单"
-              onClick={(e) => {
-                e.stopPropagation()
-                onAddToPlaylist()
-              }}
-            >
-              <ListPlus size={16} />
+      {!selecting && hover && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
+          <IconButton title="添加至歌单" onClick={(e) => { e.stopPropagation(); onAddToPlaylist() }}>
+            <ListPlus size={16} />
+          </IconButton>
+          {!isCurrent && (
+            <IconButton title="下一首播放" onClick={(e) => { e.stopPropagation(); onPlayNext() }}>
+              <ListStart size={16} />
             </IconButton>
-            {!isCurrent && (
-              <IconButton
-                title="下一首播放"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onPlayNext()
-                }}
-              >
-                <ListStart size={16} />
-              </IconButton>
-            )}
-            <IconButton
-              title="从队列移除"
-              danger
-              onClick={(e) => {
-                e.stopPropagation()
-                onRemove()
-              }}
-            >
-              <Trash2 size={16} />
-            </IconButton>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
+          )}
+          <IconButton title="从队列移除" danger onClick={(e) => { e.stopPropagation(); onRemove() }}>
+            <Trash2 size={16} />
+          </IconButton>
+        </div>
+      )}
+    </div>
   )
-}
+})
 
 function Equalizer({ active }: { active: boolean }) {
-  const bars = [
-    { duration: 0.78, values: ['4px', '13px', '5px'] },
-    { duration: 0.92, values: ['11px', '4px', '12px'] },
-    { duration: 0.68, values: ['6px', '14px', '6px'] },
-  ]
-
   return (
     <div style={{ height: 16, display: 'flex', alignItems: 'end', gap: 2 }}>
-      {bars.map((bar, index) => (
-        <motion.span
+      {[0.78, 0.92, 0.68].map((duration, index) => (
+        <span
           key={index}
-          animate={active ? { height: bar.values } : { height: '5px' }}
-          transition={{ repeat: active ? Infinity : 0, duration: bar.duration, ease: 'easeInOut' }}
           style={{
             width: 3,
+            height: active ? 14 : 5,
             borderRadius: 999,
             background: '#ff375f',
-            boxShadow: '0 0 10px rgba(255, 55, 95, 0.65)',
+            transformOrigin: 'bottom',
+            animation: active ? `am-eq ${duration}s ease-in-out infinite alternate` : undefined,
           }}
         />
       ))}
@@ -515,40 +434,28 @@ function Equalizer({ active }: { active: boolean }) {
 
 function SelectionBox({ selected, disabled }: { selected: boolean; disabled: boolean }) {
   return (
-    <motion.span
-      animate={{
-        backgroundColor: selected ? '#ff375f' : 'var(--queue-selbox-bg)',
-        borderColor: selected ? '#ff375f' : 'var(--queue-selbox-border)',
-      }}
+    <span
       style={{
         width: 16,
         height: 16,
         borderRadius: 5,
-        border: '1px solid var(--queue-selbox-border)',
+        border: `1px solid ${selected ? '#ff375f' : 'var(--queue-selbox-border)'}`,
+        background: selected ? '#ff375f' : 'var(--queue-selbox-bg)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         opacity: disabled ? 0.45 : 1,
+        boxSizing: 'border-box',
       }}
     >
       {selected && <Check size={12} strokeWidth={3} style={{ color: '#fff' }} />}
-    </motion.span>
+    </span>
   )
 }
 
 function EmptyQueue() {
   return (
-    <div
-      style={{
-        minHeight: 190,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 12,
-        color: 'var(--queue-text-3)',
-      }}
-    >
+    <div style={{ minHeight: 190, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, color: 'var(--queue-text-3)' }}>
       <Music size={38} strokeWidth={1.2} />
       <span style={{ fontSize: 13, fontWeight: 600 }}>队列为空</span>
     </div>
@@ -570,20 +477,12 @@ function IconButton({
   danger?: boolean
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void
 }) {
-  const activeColor = danger ? '#ff453a' : '#ff375f'
-
   return (
-    <motion.button
+    <button
       type="button"
       onClick={onClick}
       title={title}
       disabled={disabled}
-      whileHover={disabled ? undefined : {
-        backgroundColor: danger ? 'rgba(255, 69, 58, 0.13)' : 'var(--queue-row-hover-strong)',
-        color: danger ? '#ff6961' : 'var(--queue-text)',
-      }}
-      whileTap={disabled ? undefined : { scale: 0.9 }}
-      transition={{ duration: 0.16 }}
       style={{
         width: 30,
         height: 30,
@@ -591,7 +490,7 @@ function IconButton({
         borderRadius: 9,
         border: 'none',
         background: active ? 'rgba(255, 55, 95, 0.12)' : 'transparent',
-        color: disabled ? 'var(--queue-text-4)' : active ? activeColor : 'var(--queue-icon)',
+        color: disabled ? 'var(--queue-text-4)' : active ? (danger ? '#ff453a' : '#ff375f') : 'var(--queue-icon)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -599,7 +498,7 @@ function IconButton({
       }}
     >
       {children}
-    </motion.button>
+    </button>
   )
 }
 

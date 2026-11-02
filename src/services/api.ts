@@ -158,10 +158,11 @@ export async function getVideoComments(
 export async function extractAudio(
   bvid: string,
   fallback?: { aid?: string | number; cid?: string | number },
+  pageCid?: string | number,
 ): Promise<TrackSource> {
   // 共用 API 适配器：桌面环境的鉴权由主进程网关代持。
   const { extractAudioFromVideo } = rendererApi
-  return extractAudioFromVideo(bvid, fallback)
+  return extractAudioFromVideo(bvid, fallback, pageCid)
 }
 
 // ===== 下载音频 =====
@@ -552,10 +553,14 @@ export async function getMusicFeed(options: MusicFeedOptions): Promise<VideoInfo
   const limit = Math.max(1, Math.min(40, options.limit || 21))
   const recent = (options.recentTracks || []).filter(track => track.bvid).slice(0, 10)
   const anchor = recent[seed % Math.max(1, recent.length)]
+  const tagCount = options.mode === 'discover' ? 4 : 1
   const requests: Promise<VideoInfo[]>[] = [
-    searchMusicTag(MUSIC_TAGS[seed % MUSIC_TAGS.length], seed),
     getMusicRanking({ source: 'latest', page: 1 + seed % 30, pageSize: 50 }),
   ]
+  for (let i = 0; i < tagCount; i++) {
+    const cursor = seed + i
+    requests.push(searchMusicTag(MUSIC_TAGS[cursor % MUSIC_TAGS.length], cursor))
+  }
   if (options.mode === 'recommend') {
     requests.unshift(getRecommendVideos(30, seed))
     requests.push(freshMusic(), musicDynamics())
@@ -566,7 +571,8 @@ export async function getMusicFeed(options: MusicFeedOptions): Promise<VideoInfo
   let result = mixMusicPools(pools, options.seenTrackIds, limit)
   // Bounded replenishment from different genres and deeper pages, never replay
   // old songs or relax the song filter just to fill the screen.
-  for (let round = 1; result.length < limit && round <= 3; round++) {
+  const extraRounds = options.mode === 'discover' ? 1 : 3
+  for (let round = 1; result.length < limit && round <= extraRounds; round++) {
     const extra = await Promise.allSettled([1, 2].map(offset => {
       const cursor = seed + round * 2 + offset
       return searchMusicTag(MUSIC_TAGS[cursor % MUSIC_TAGS.length], cursor)

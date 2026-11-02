@@ -1,9 +1,6 @@
-const HARMONY_PLATFORM = 'openharmony'
-
 function getPersistentApi() {
-  const api = window.electronAPI
-  if (api?.platform !== HARMONY_PLATFORM) return null
-  return api.persistentStorage
+  if (typeof window === 'undefined') return null
+  return window.electronAPI?.persistentStorage ?? null
 }
 
 export function readStoredItem(key: string): string | null {

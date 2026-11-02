@@ -22,7 +22,7 @@ async function verify() {
   const shippedPackage = JSON.parse(asar.extractFile(archive, 'package.json').toString())
   assert.equal(shippedPackage.version, version)
   const updateConfig = fs.readFileSync(`${releaseDir}/win-unpacked/resources/app-update.yml`, 'utf8')
-  assert.match(updateConfig, /owner: Withnoidea/)
+  assert.match(updateConfig, /owner: zr0731/)
   assert.match(updateConfig, /repo: BiliMusic/)
   assert.ok(!fs.readFileSync('dist-electron/main.js', 'utf8').includes('HanversionOvO/BiliMusic'), 'compiled updater must not reference upstream')
   const smoke = JSON.parse(fs.readFileSync('artifacts/qa-packaged/smoke-result.json', 'utf8'))

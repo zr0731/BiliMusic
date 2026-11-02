@@ -88,6 +88,10 @@ interface PersistentStorageApi {
 
 export interface DesktopLyricsStyle {
   fontSize: number
+  /** 中文用这套字体。空着就用微软雅黑。 */
+  fontFamily?: string
+  /** 英文用这套字体。空着就用 Times New Roman。 */
+  latinFontFamily?: string
   bold: boolean
   color: string
   outline: boolean
@@ -106,12 +110,35 @@ export interface DesktopLyricsStatePatch {
   isPlaying?: boolean
   hasTrack?: boolean
   locked?: boolean
+  /** 详情页打开时先按住。主窗口最小化后仍要显示。 */
+  hold?: boolean
   style?: Partial<DesktopLyricsStyle>
 }
 
 interface DesktopLyricsApi {
   setState: (patch: DesktopLyricsStatePatch) => void
   toggleLock: () => void
+  onAdjustFont: (callback: (delta: number) => void) => () => void
+  onLockChanged: (callback: (locked: boolean) => void) => () => void
+  onClose?: (callback: () => void) => () => void
+  resetPosition?: () => void
+}
+
+interface VideoWindowStatePatch {
+  visible?: boolean
+  url?: string
+  title?: string
+  paused?: boolean
+  time?: number
+  note?: string
+  quality?: string
+}
+
+interface VideoWindowApi {
+  setState: (patch: VideoWindowStatePatch) => void
+  onClosed: (callback: () => void) => () => void
+  onCommand?: (callback: (command: 'prev' | 'next' | 'toggle') => void) => () => void
+  onPictureFailed?: (callback: () => void) => () => void
 }
 
 export interface TrayPlayerState {
@@ -162,6 +189,13 @@ declare global {
   interface Window {
     electronAPI: {
       minimize: () => void
+      onMinimizedChange?: (callback: (minimized: boolean) => void) => () => void
+      systemPrefersDark?: () => boolean
+      getSmallWindowQuality?: () => '480' | '720' | '1080' | ''
+      setSmallWindowQuality?: (value: '480' | '720' | '1080') => void
+      onSystemTheme?: (callback: (dark: boolean) => void) => () => void
+      listSystemFonts?: () => Promise<{ chinese: string[]; latin: string[] }>
+      measureLoudness?: (url: string) => Promise<number>
       maximize: () => void
       close: () => void
       isMaximized?: () => Promise<boolean>
@@ -190,6 +224,7 @@ declare global {
       platform: string
       persistentStorage?: PersistentStorageApi
       desktopLyrics?: DesktopLyricsApi
+      videoWindow?: VideoWindowApi
       biliApi: BiliApi
       lyricsApi: LyricsApi
       playlistApi: PlaylistApi

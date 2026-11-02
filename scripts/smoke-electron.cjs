@@ -1,6 +1,17 @@
 // Deterministic real-Electron smoke test. Uses a fresh profile and silent audio, never user data.
 const { app, session, net, BrowserWindow, globalShortcut, dialog, shell, screen, ipcMain } = require('electron')
 const fs = require('node:fs')
+const writeFileSync = fs.writeFileSync.bind(fs)
+fs.writeFileSync = (file, data, ...rest) => {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try { return writeFileSync(file, data, ...rest) }
+    catch (error) {
+      if (error.code !== 'UNKNOWN' || attempt === 5) throw error
+      const until = Date.now() + 250
+      while (Date.now() < until) {}
+    }
+  }
+}
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const assert = require('node:assert/strict')
@@ -49,7 +60,7 @@ net.fetch = async (url, options) => {
   if (address.startsWith('https://test.bilivideo.com/')) return new Response(silent, { headers: { 'content-type': 'audio/mp4', 'content-length': String(silent.length) } })
   if (address.startsWith('https://github.com/') || address.startsWith('https://api.github.com/')) {
     updateRequests.push(address)
-    assert.ok(address.includes('/Withnoidea/BiliMusic/'), 'updates must never query upstream: ' + address)
+    assert.ok(address.includes('/zr0731/BiliMusic/'), 'updates must never query upstream: ' + address)
     if (updateMode === 'error') throw new Error('QA update network unavailable')
     if (address.endsWith('/ota.json') || updateMode === 'missing') return new Response('', { status: 404 })
     return new Response(JSON.stringify({ tag_name: 'v999.0.0', draft: false, prerelease: false }))
@@ -62,7 +73,7 @@ app.on('browser-window-created', (_event, window) => {
   const wc = window.webContents
   wc.on('console-message', (event) => { console.log('[renderer]', event.message); if (event.level === 'error' && !event.message.includes('Error invoking')) failures.push(event.message) })
   wc.debugger.attach('1.3')
-  void wc.debugger.sendCommand('Page.enable').then(() => wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: `window.__audioElements=[]; const OriginalAudio=window.Audio; window.Audio=class extends OriginalAudio { constructor(...args) { super(...args); window.__audioElements.push(this); } };` }))
+  void wc.debugger.sendCommand('Page.enable').then(() => wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: `window.addEventListener('error', event => console.log('WINDOW_ERROR ' + (event.error && event.error.stack || event.message))); window.__audioElements=[]; const OriginalAudio=window.Audio; window.Audio=class extends OriginalAudio { constructor(...args) { super(...args); window.__audioElements.push(this); } };` }))
 })
 app.whenReady().then(() => {
   const auth = session.fromPartition('persist:bili-auth')
@@ -290,7 +301,7 @@ async function run() {
   await waitFor(() => js('location.hash === "#/playlists" && !document.body.textContent.includes("QA 完整歌单")'), 'deleted playlist removed and overview responsive')
   assert.equal(await js('JSON.parse(localStorage.getItem("bilimusic_playlists")).length'), 0)
   assert.equal(await js('JSON.parse(localStorage.getItem("bilimusic_playlists_deleted")).some(t => t.id === "qa-list")'), true, 'deletion tombstone retained for sync')
-  for (const route of ['discover', 'recommend', 'recent', 'favorites', 'downloads', 'import', 'search', 'playlists', 'settings']) {
+  for (const route of ['discover', 'recommend', 'recent', 'favorites', 'downloads', 'search', 'playlists', 'settings']) {
     await physicalClick(`document.querySelector('a[href="#/${route}"]')`)
     await waitFor(() => js(`location.hash === '#/${route}'`), 'native navigation after deletion: ' + route)
   }
@@ -309,7 +320,7 @@ async function run() {
   await js(`localStorage.setItem('bilimusic_playlists', '[]'); window.dispatchEvent(new Event('bilimusic:playlists-changed'))`)
   await waitFor(() => js('document.body.textContent.includes("歌单不存在")'), 'sync deletion while detail mounted')
   await physicalClick(`document.querySelector('a[href="#/settings"]')`)
-  await waitFor(() => js('document.body.textContent.includes("Withnoidea/BiliMusic")'), 'fork update source visible')
+  await waitFor(() => js('document.body.textContent.includes("zr0731/BiliMusic")'), 'fork update source visible')
   const checkUpdateButton = `[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '检查更新')`
   await physicalClick(checkUpdateButton)
   await waitFor(() => js('document.body.textContent.includes("暂无可用的正式发布版本")'), 'fork without releases is not falsely up-to-date')
@@ -321,13 +332,13 @@ async function run() {
   await waitFor(() => js('document.body.textContent.includes("暂无可用的正式发布版本")'), 'update check can retry after error')
   fs.writeFileSync(path.join(output, 'fork-updates.png'), (await win.webContents.capturePage()).toPNG())
   await physicalClick(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '关于项目')`)
-  assert.equal(externalUrls.at(-1), 'https://github.com/Withnoidea/BiliMusic')
+  assert.equal(externalUrls.at(-1), 'https://github.com/zr0731/BiliMusic')
   await physicalClick(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '版本发布页')`)
-  assert.equal(externalUrls.at(-1), 'https://github.com/Withnoidea/BiliMusic/releases')
+  assert.equal(externalUrls.at(-1), 'https://github.com/zr0731/BiliMusic/releases')
   updateMode = 'release'
   await physicalClick(checkUpdateButton)
   await waitFor(() => js('document.body.textContent.includes("已打开下载页")'), 'release without OTA offers manual fork download')
-  assert.equal(externalUrls.at(-1), 'https://github.com/Withnoidea/BiliMusic/releases')
+  assert.equal(externalUrls.at(-1), 'https://github.com/zr0731/BiliMusic/releases')
   updateMode = 'missing'
   await physicalClick(`document.querySelector('a[href="#/playlists"]')`)
   fs.writeFileSync(path.join(output, 'playlist-delete-responsive.png'), (await win.webContents.capturePage()).toPNG())
@@ -366,14 +377,24 @@ async function run() {
 
   await js('window.__audioElements.at(-1).pause()')
   await sleep(400)
+  await js(`localStorage.removeItem('bilimusic_player_state')`)
   await win.webContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: "localStorage.removeItem('bilimusic_player_state')" })
   await js('location.reload()')
-  await waitFor(() => js('!!document.querySelector(".player-bar") && !document.querySelector(".player-bar__labels")?.textContent.includes("队列歌曲")'), 'empty player after reload')
+  await waitFor(() => js('document.querySelector(".player-bar__labels")?.textContent.includes("未在播放")'), 'empty player after reload')
   await sleep(400)
-  await js(`localStorage.setItem('bilimusic_desktop_lyrics',JSON.stringify({enabled:true,locked:false,style:{fontSize:32,showBg:true}})); window.dispatchEvent(new Event('DESKTOP_LYRICS_CHANGED_EVENT'))`)
+  await js(`document.querySelector('[title="打开桌面歌词"]').click()`)
+  await waitFor(() => js(`!!document.querySelector('[title="关闭桌面歌词"]')`), 'desktop lyrics enabled while idle')
 
-  await waitFor(() => BrowserWindow.getAllWindows().some(w => w.webContents.getURL().startsWith('data:') && w.getBounds().width > 400), 'lyrics window created')
-  const lyrics = BrowserWindow.getAllWindows().find(w => w.webContents.getURL().startsWith('data:') && w !== win && w.getBounds().width > 400)
+  const lyricsWindow = async () => {
+    for (const candidate of BrowserWindow.getAllWindows()) {
+      if (candidate === win || candidate.isDestroyed() || candidate.getBounds().width < 500) continue
+      if (!candidate.webContents.getURL().startsWith('data:')) continue
+      if (await candidate.webContents.executeJavaScript('!!document.getElementById("line")').catch(() => false)) return candidate
+    }
+    return null
+  }
+  await waitFor(async () => !!(await lyricsWindow()), 'lyrics window created')
+  const lyrics = await lyricsWindow()
   await waitFor(() => lyrics.webContents.executeJavaScript('document.getElementById("line")?.textContent.includes("已就绪")'), 'idle lyric preview')
   await waitFor(() => lyrics.isVisible(), 'lyrics ready and visible')
   await sleep(300)
@@ -386,8 +407,8 @@ async function run() {
   const box = lyrics.getBounds()
   assert.ok(box.x + box.width <= area.x + area.width)
   assert.equal(await lyricJS('getComputedStyle(document.getElementById("line")).textOverflow'), 'ellipsis')
-  assert.equal(await lyricJS('getComputedStyle(document.getElementById("dragBar")).pointerEvents'), 'none')
-  assert.equal(await lyricJS('getComputedStyle(document.getElementById("nextLine")).color'), 'rgb(255, 55, 95)')
+  assert.equal(await lyricJS('getComputedStyle(document.querySelector(".lyric-box")).color'), 'rgb(255, 55, 95)')
+  assert.equal(await lyricJS('!!document.getElementById("incoming") && document.getElementById("root") === document.querySelector("#root")'), true)
   fs.writeFileSync(path.join(output, 'lyrics-long.png'), (await lyrics.webContents.capturePage()).toPNG())
   // Simulate native DIP cursor movements without moving the user's real cursor.
   const originalCursor = screen.getCursorScreenPoint
@@ -399,10 +420,13 @@ async function run() {
     cursor = { x, y }
     ipcMain.emit('desktop-lyrics:drag:move', lyricEvent)
     const edge = lyrics.getBounds()
-    const gapX = x < 0 ? edge.x - area.x : area.x + area.width - edge.x - edge.width
-    const gapY = y < 0 ? edge.y - area.y : area.y + area.height - edge.y - edge.height
-    assert.ok(gapX >= 0 && gapX <= 5, 'DPI-rounded horizontal inset: ' + gapX)
-    assert.ok(gapY >= 0 && gapY <= 5, 'DPI-rounded vertical inset: ' + gapY)
+    const display = screen.getDisplayNearestPoint({ x, y }).bounds
+    const keepX = Math.min(180, Math.max(48, display.width - 8))
+    const keepY = Math.min(48, Math.max(24, display.height - 8))
+    const visibleW = Math.min(edge.x + edge.width, display.x + display.width) - Math.max(edge.x, display.x)
+    const visibleH = Math.min(edge.y + edge.height, display.y + display.height) - Math.max(edge.y, display.y)
+    assert.ok(Math.abs(visibleW - keepX) <= 2, 'horizontal kept strip: ' + visibleW)
+    assert.ok(Math.abs(visibleH - keepY) <= 2, 'vertical kept strip: ' + visibleH)
     const stable = lyrics.getBounds()
     ipcMain.emit('desktop-lyrics:drag:move', lyricEvent)
     assert.deepEqual(lyrics.getBounds(), stable, 'stationary pointer cannot accumulate movement')
@@ -425,8 +449,12 @@ async function run() {
   assert.equal(failures.length, 0, failures.join('\n'))
   fs.writeFileSync(path.join(output, 'smoke-error.txt'), '')
   const testedAsarSha256 = packaged ? require('node:crypto').createHash('sha256').update(require('original-fs').readFileSync(path.join(root, releaseDir, 'win-unpacked/resources/app.asar'))).digest('hex') : null
-  fs.writeFileSync(path.join(output, 'smoke-result.json'), JSON.stringify({ passed: true, releaseDir, appVersion: app.getVersion(), testedAt: new Date().toISOString(), testedAsarSha256, packaged, skippedChecks, updateRequests, externalUrls, qrUpstreamPolls, qrCookieHeaderEntries, checks: ['delete populated/empty playlist then native mouse navigation on all nine pages', 'missing route and externally deleted playlist settle without render loop', 'fork-only update endpoints and about/release links', 'no-release message, network failure retry and manual download without OTA', 'music-only discovery and three disjoint refresh batches', 'all PlayerBar Chinese titles, repeat badge/toast and desktop lyrics toggle', 'clean mixed recommendations and non-repeating refresh', 'full favorites and playlist queues', 'sequential next/previous', 'shuffle full coverage and history', 'QR real HTTP merged headers, double-store persistence and immediate profile refresh', 'confirmed QR flush failure retries without upstream re-poll or false expiry', 'genuine server expiry still works', 'idle lyric preview and long-line ellipsis', 'four-edge lyric clamp, no incremental drift, blur/cancel/global release recovery', 'production debug switch closed', 'no credential bridge', '320kbps MP3 export with title, artist, album and cover', 'verified local playback without playUrl', '720px responsive layout and metadata legibility', 'all three global media shortcuts registered', 'error refresh and position recovery', 'path boundary rejection', 'authorized folder selection and opening', '680px minimum layout', 'hidden-window playback controls', 'keyboard slider tooltip', 'all windows sandboxed and isolated', 'no renderer console errors'].filter(check => !unavailableHotkeys.length || check !== 'all three global media shortcuts registered'), playRequests, viewport: overflow }, null, 2))
+  fs.writeFileSync(path.join(output, 'smoke-result.json'), JSON.stringify({ passed: true, releaseDir, appVersion: app.getVersion(), testedAt: new Date().toISOString(), testedAsarSha256, packaged, skippedChecks, updateRequests, externalUrls, qrUpstreamPolls, qrCookieHeaderEntries, checks: ['delete populated/empty playlist then native mouse navigation on every sidebar page', 'missing route and externally deleted playlist settle without render loop', 'fork-only update endpoints and about/release links', 'no-release message, network failure retry and manual download without OTA', 'music-only discovery and three disjoint refresh batches', 'all PlayerBar Chinese titles, repeat badge/toast and desktop lyrics toggle', 'clean mixed recommendations and non-repeating refresh', 'full favorites and playlist queues', 'sequential next/previous', 'shuffle full coverage and history', 'QR real HTTP merged headers, double-store persistence and immediate profile refresh', 'confirmed QR flush failure retries without upstream re-poll or false expiry', 'genuine server expiry still works', 'idle lyric preview and long-line ellipsis', 'four-edge lyric clamp, no incremental drift, blur/cancel/global release recovery', 'production debug switch closed', 'no credential bridge', '320kbps MP3 export with title, artist, album and cover', 'verified local playback without playUrl', '720px responsive layout and metadata legibility', 'all three global media shortcuts registered', 'error refresh and position recovery', 'path boundary rejection', 'authorized folder selection and opening', '680px minimum layout', 'hidden-window playback controls', 'keyboard slider tooltip', 'all windows sandboxed and isolated', 'no renderer console errors'].filter(check => !unavailableHotkeys.length || check !== 'all three global media shortcuts registered'), playRequests, viewport: overflow }, null, 2))
   console.log('SMOKE PASS', JSON.stringify({ playRequests, viewport: overflow }))
   if (!process.argv.includes('--interactive')) app.exit(0)
 }
-run().catch(error => { console.error(error); fs.writeFileSync(path.join(output, 'smoke-error.txt'), String(error.stack || error)); app.exit(1) })
+run().catch(error => {
+  console.error(error)
+  try { fs.writeFileSync(path.join(output, 'smoke-error.txt'), String(error.stack || error)) } catch { /* the report file can be locked; the console still has the error */ }
+  app.exit(1)
+})

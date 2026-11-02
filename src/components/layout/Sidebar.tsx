@@ -13,10 +13,10 @@ import {
   ChevronRight,
   Plus,
   X,
-  ArrowDownToLine,
   type LucideIcon,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import { useAppSettings } from '@/hooks/useAppSettings'
 import { createPlaylist, loadPlaylists, PLAYLISTS_CHANGED_EVENT } from '@/utils/storage'
@@ -45,12 +45,6 @@ const menuGroups: Array<{ title: string; items: NavItem[] }> = [
     ],
   },
   {
-    title: '导入',
-    items: [
-      { icon: ArrowDownToLine, label: '歌单导入', path: '/import' },
-    ],
-  },
-  {
     title: '播放列表',
     items: [
       { icon: ListMusic, label: '所有歌单', path: '/playlists' },
@@ -58,17 +52,11 @@ const menuGroups: Array<{ title: string; items: NavItem[] }> = [
   },
 ]
 
-const spring = {
-  type: 'spring',
-  stiffness: 430,
-  damping: 34,
-  mass: 0.7,
-} as const
-
 export default function Sidebar() {
   const { isLoggedIn, username, avatar, setShowLogin } = useAuth()
   const { settings } = useAppSettings()
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const [playlists, setPlaylists] = useState<Playlist[]>(() => loadPlaylists())
   const [creating, setCreating] = useState(false)
   const [isNarrow, setIsNarrow] = useState(() => window.innerWidth < 1100)
@@ -106,8 +94,6 @@ export default function Sidebar() {
         style={{
           width: collapsed ? 78 : 244,
           background: 'var(--sidebar-bg)',
-          backdropFilter: 'blur(28px) saturate(150%)',
-          WebkitBackdropFilter: 'blur(28px) saturate(150%)',
           borderRight: '1px solid var(--sidebar-border)',
           boxShadow: 'var(--sidebar-shadow)',
           color: 'var(--sidebar-text)',
@@ -193,13 +179,14 @@ export default function Sidebar() {
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               {group.items.map((item) => (
-                <SidebarLink key={item.path} item={item} collapsed={collapsed} />
+                <SidebarLink key={item.path} item={item} collapsed={collapsed} pathname={pathname} />
               ))}
               {group.title === '播放列表' && playlists.map((playlist) => (
                 <SidebarLink
                   key={playlist.id}
                   item={{ icon: ListMusic, label: playlist.name, path: `/playlists/${playlist.id}` }}
                   collapsed={collapsed}
+                  pathname={pathname}
                 />
               ))}
             </div>
@@ -215,7 +202,7 @@ export default function Sidebar() {
           boxShadow: 'var(--sidebar-footer-shadow)',
         }}
       >
-        <SidebarLink item={{ icon: Settings, label: '设置', path: '/settings' }} compact collapsed={collapsed} />
+        <SidebarLink item={{ icon: Settings, label: '设置', path: '/settings' }} compact collapsed={collapsed} pathname={pathname} />
 
         <motion.button
           type="button"
@@ -289,23 +276,7 @@ export default function Sidebar() {
                 gap: 6,
               }}
             >
-              {isLoggedIn && (
-                <motion.span
-                  animate={{
-                    scale: [1, 1.45, 1],
-                    opacity: [0.75, 1, 0.75],
-                  }}
-                  transition={{ duration: 1.9, repeat: Infinity, ease: 'easeInOut' }}
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    background: '#30d158',
-                    boxShadow: '0 0 12px rgba(48, 209, 88, 0.65)',
-                    display: 'inline-block',
-                  }}
-                />
-              )}
+              {isLoggedIn && <span className="sidebar-online-dot" />}
               {isLoggedIn ? '在线' : '点击登录账号'}
             </div>
           </div>}
@@ -407,9 +378,9 @@ function CreatePlaylistDialog({
   )
 }
 
-function SidebarLink({ item, compact = false, collapsed = false }: { item: NavItem; compact?: boolean; collapsed?: boolean }) {
+function SidebarLink({ item, compact = false, collapsed = false, pathname }: { item: NavItem; compact?: boolean; collapsed?: boolean; pathname: string }) {
   const Icon = item.icon
-  const { pathname } = useLocation()
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null)
 
   return (
     <NavLink to={item.path} style={{ textDecoration: 'none' }}>
@@ -419,93 +390,27 @@ function SidebarLink({ item, compact = false, collapsed = false }: { item: NavIt
           : pathname === item.path
 
         return (
-          <motion.div
-            whileHover={{
-              backgroundColor: selected ? 'var(--sidebar-active-bg)' : 'var(--sidebar-hover)',
-              x: selected ? 0 : 2,
+          <>
+          <div
+            className={`sidebar-link${compact ? ' is-compact' : ''}${collapsed ? ' is-collapsed' : ''}${selected ? ' is-selected' : ''}`}
+            onMouseEnter={(event) => {
+              if (!collapsed) return
+              const rect = event.currentTarget.getBoundingClientRect()
+              setTip({ x: rect.right + 10, y: rect.top + rect.height / 2 })
             }}
-            whileTap={{ scale: 0.985 }}
-            transition={{ duration: 0.18 }}
-            style={{
-              height: compact ? 36 : 34,
-              borderRadius: 8,
-              color: selected ? 'var(--sidebar-text)' : 'var(--sidebar-muted-text)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: collapsed ? 'center' : 'flex-start',
-              gap: 10,
-              padding: '0 10px',
-              position: 'relative',
-              overflow: 'hidden',
-              cursor: 'pointer',
-              fontSize: 13,
-              fontWeight: selected ? 650 : 500,
-              lineHeight: 1,
-            }}
+            onMouseLeave={() => setTip(null)}
           >
-            {selected && (
-              <motion.div
-                layoutId="sidebar-active-pill"
-                transition={spring}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  borderRadius: 8,
-                  background: 'var(--sidebar-active-pill)',
-                  boxShadow: 'var(--sidebar-active-shadow)',
-                }}
-              />
-            )}
-
-            {selected && (
-              <motion.span
-                layoutId="sidebar-active-rail"
-                transition={spring}
-                style={{
-                  position: 'absolute',
-                  left: 0,
-                  top: 7,
-                  bottom: 7,
-                  width: 3,
-                  borderRadius: 3,
-                  background: 'var(--color-primary)',
-                  boxShadow: '0 0 14px rgba(255, 55, 95, 0.8)',
-                }}
-              />
-            )}
-
-            <motion.span
-              animate={{
-                color: selected ? 'var(--color-primary)' : 'var(--sidebar-subtle-text)',
-                scale: selected ? 1.04 : 1,
-              }}
-              transition={spring}
-              style={{
-                width: 20,
-                height: 20,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                position: 'relative',
-                zIndex: 1,
-                flexShrink: 0,
-              }}
-            >
+            {selected && <span className="sidebar-link__rail" />}
+            <span className="sidebar-link__icon">
               <Icon size={18} strokeWidth={selected ? 2.35 : 2} />
-            </motion.span>
-
-            {!collapsed && <span
-              style={{
-                position: 'relative',
-                zIndex: 1,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {item.label}
-            </span>}
-          </motion.div>
+            </span>
+            {!collapsed && <span className="sidebar-link__label">{item.label}</span>}
+          </div>
+          {collapsed && tip && createPortal(
+            <span className="sidebar-tip" style={{ left: tip.x, top: tip.y }}>{item.label}</span>,
+            document.body,
+          )}
+          </>
         )
       }}
     </NavLink>

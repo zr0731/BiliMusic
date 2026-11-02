@@ -3,9 +3,6 @@ import { openDownloadsFolder, getDownloadsFolderPath, friendlyDownloadError } fr
 import { usePlayer } from '@/contexts/PlayerContext'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
-  Cloud,
-  CloudDownload,
-  CloudUpload,
   FileDown,
   FileUp,
   Download,
@@ -37,7 +34,6 @@ import {
 } from '@/hooks/useDesktopLyrics'
 import type { DesktopLyricsStyle } from '@/types/electron.d'
 import { createPlaylistsExport, importPlaylistsFromText } from '@/utils/storage'
-import { runSync, forceUpload, forceDownload, getLastSync, SYNC_STATE_EVENT, WEBDAV_CONFIGURED_EVENT, type SyncResult } from '@/utils/sync'
 import type { AppSettings, SidebarState, ThemeMode } from '@/types'
 
 export default function Settings() {
@@ -50,6 +46,14 @@ export default function Settings() {
   const [updateStatus, setUpdateStatus] = useState('')
   const [updateAction, setUpdateAction] = useState<'restart' | 'reload' | null>(null)
   const [dl, setDl] = useState<DesktopLyricsSettings>(() => loadDesktopLyricsSettings())
+  const [systemFonts, setSystemFonts] = useState<{ chinese: string[]; latin: string[] }>({ chinese: [], latin: [] })
+  const [fontAdvanced, setFontAdvanced] = useState(false)
+
+  useEffect(() => {
+    window.electronAPI?.listSystemFonts?.().then(groups => {
+      if (groups && Array.isArray(groups.chinese) && Array.isArray(groups.latin)) setSystemFonts(groups)
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     const sync = () => setDl(loadDesktopLyricsSettings())
@@ -63,7 +67,12 @@ export default function Settings() {
 
   const updateDl = (patch: { enabled?: boolean; locked?: boolean; style?: Partial<DesktopLyricsStyle> }) => {
     const current = loadDesktopLyricsSettings()
-    const next: DesktopLyricsSettings = { ...current, ...patch, style: { ...current.style, ...(patch.style || {}) } }
+    const next: DesktopLyricsSettings = {
+      ...current,
+      ...patch,
+      lockChosen: patch.locked !== undefined ? true : current.lockChosen,
+      style: { ...current.style, ...(patch.style || {}) },
+    }
     setDl(next)
     saveDesktopLyricsSettings(next)
   }
@@ -115,63 +124,9 @@ export default function Settings() {
     else if (updateAction === 'reload') window.electronAPI?.applyRendererUpdate?.()
   }
 
-  // ===== 云同步（WebDAV）=====
-  const [davUrl, setDavUrl] = useState('')
-  const [davUser, setDavUser] = useState('')
-  const [davPass, setDavPass] = useState('')
-  const [davConfigured, setDavConfigured] = useState(false)
-  const [syncMessage, setSyncMessage] = useState('')
   const { showToast } = usePlayer()
   const [resolvedDownloadDir, setResolvedDownloadDir] = useState('')
   useEffect(() => { getDownloadsFolderPath().then(setResolvedDownloadDir).catch(() => setResolvedDownloadDir('请重新选择下载目录')) }, [settings.downloadDir])
-  const [syncBusy, setSyncBusy] = useState(false)
-  const [lastSync, setLastSync] = useState(getLastSync())
-
-  useEffect(() => {
-    window.electronAPI?.getWebdavConfig?.().then((c) => {
-      if (c?.configured) {
-        setDavUrl(c.url)
-        setDavUser(c.username)
-        setDavConfigured(true)
-      }
-    })
-    const onSyncState = () => setLastSync(getLastSync())
-    window.addEventListener(SYNC_STATE_EVENT, onSyncState)
-    return () => window.removeEventListener(SYNC_STATE_EVENT, onSyncState)
-  }, [])
-
-  const persistWebdav = async (): Promise<boolean> => {
-    if (!davUrl.trim() || !davUser.trim()) {
-      setSyncMessage('请填写 WebDAV 地址和账号')
-      return false
-    }
-    // 密码留空表示沿用已保存的密码（主进程处理）
-    await window.electronAPI?.configureWebdav?.({ url: davUrl.trim(), username: davUser.trim(), password: davPass })
-    setDavConfigured(true)
-    setDavPass('')
-    window.dispatchEvent(new CustomEvent(WEBDAV_CONFIGURED_EVENT)) // 通知 useAutoSync 启用
-    return true
-  }
-  const handleSaveWebdav = async () => {
-    if (await persistWebdav()) setSyncMessage('配置已保存')
-  }
-  const handleTestWebdav = async () => {
-    if (!(await persistWebdav())) return
-    setSyncMessage('正在测试连接…')
-    const r = await window.electronAPI?.testWebdav?.()
-    setSyncMessage(r?.message || '测试失败')
-  }
-  const runSyncTask = async (task: () => Promise<SyncResult>, busyText: string) => {
-    if (!davConfigured) {
-      setSyncMessage('请先配置并保存 WebDAV')
-      return
-    }
-    setSyncBusy(true)
-    setSyncMessage(busyText)
-    const r = await task()
-    setSyncMessage(r.message)
-    setSyncBusy(false)
-  }
 
   const changeDownloadDir = async () => {
     try {
@@ -255,6 +210,15 @@ export default function Settings() {
           </SettingsGroup>
 
           <SettingsGroup title="播放" icon={<Music2 size={20} />}>
+            <SettingsRow label="小窗画质" description="小窗默认 480p，比网页常见的高清更省流量。改完会马上重新加载当前画面">
+              <StyledSelect
+                value={settings.smallWindowQuality === '1080' ? '1080p' : settings.smallWindowQuality === '720' ? '720p' : '480p'}
+                onChange={(label) => setAppSettings({
+                  smallWindowQuality: label === '1080p' ? '1080' : label === '720p' ? '720' : '480',
+                })}
+                options={['480p', '720p', '1080p']}
+              />
+            </SettingsRow>
             <SettingsRow label="音质">
               <StyledSelect
                 value={settings.playQuality}
@@ -262,14 +226,55 @@ export default function Settings() {
                 options={['标准', '高品质', '无损']}
               />
             </SettingsRow>
+            <SettingsRow label="打开软件就开始播放" description="上次那首歌和它所在的歌单都会留下来。打开后，一进软件就从上次的进度接着播；关掉则先停在那里，等你按播放">
+              <ToggleSwitch checked={settings.resumeOnLaunch} onChange={() => setAppSettings({ resumeOnLaunch: !settings.resumeOnLaunch })} />
+            </SettingsRow>
             <SettingsRow label="自动播放" description="播放结束时自动播放推荐">
               <ToggleSwitch checked={settings.autoPlay} onChange={() => setAppSettings({ autoPlay: !settings.autoPlay })} />
             </SettingsRow>
             <SettingsRow label="歌词显示" description="播放页自动显示歌词">
               <ToggleSwitch checked={settings.showLyrics} onChange={() => setAppSettings({ showLyrics: !settings.showLyrics })} />
             </SettingsRow>
+            <SettingsRow label="失效曲目检查" description="打开软件时同一天最多查一次，或每七天查一次。查到稿件真的不在了会先列出歌名、UP 主、BV 号和原因，确认后才删除。网络失败的不删。歌单、最近播放和我喜欢里的手动按钮一直都在">
+              <StyledSelect
+                value={settings.unavailableCheck === 'launch' ? '打开软件时' : settings.unavailableCheck === 'weekly' ? '每七天' : '不检查'}
+                onChange={(label) => setAppSettings({
+                  unavailableCheck: label === '打开软件时' ? 'launch' : label === '每七天' ? 'weekly' : 'off',
+                })}
+                options={['不检查', '打开软件时', '每七天']}
+              />
+            </SettingsRow>
           </SettingsGroup>
 
+          <SettingsGroup title="下载" icon={<Download size={20} />}>
+            <SettingsRow label="下载目录">
+              <div className="settings-path">
+                <span title={resolvedDownloadDir}>{resolvedDownloadDir || '默认下载目录'}</span>
+                <button
+                  type="button"
+                  onClick={() => void openDownloadsFolder().catch(error => showToast(friendlyDownloadError(error)))}
+                  title="在文件资源管理器中打开"
+                >
+                  <FolderOpen size={14} />
+                  打开目录
+                </button>
+                <button type="button" onClick={changeDownloadDir} title="更改下载目录">
+                  更改
+                </button>
+              </div>
+            </SettingsRow>
+            <SettingsRow label="下载格式">
+              <StyledSelect
+                value={settings.downloadFormat === 'm4a' ? 'M4A (原源格式)' : 'MP3 (推荐，兼容性强)'}
+                onChange={(value) => setAppSettings({ downloadFormat: value.startsWith('M4A') ? 'm4a' : 'mp3' })}
+                options={['MP3 (推荐，兼容性强)', 'M4A (原源格式)']}
+              />
+            </SettingsRow>
+            <p className="settings-note">MP3 以 320kbps 导出并写入歌名、歌手、专辑及可用封面；有损转码不会提升原音质。M4A 保留原始音频流。</p>
+          </SettingsGroup>
+        </div>
+
+        <div className="settings-column">
           <SettingsGroup title="桌面歌词" icon={<Captions size={20} />}>
             <SettingsRow label="启用桌面歌词" description="在桌面悬浮显示实时歌词（类似 QQ 音乐）">
               <ToggleSwitch checked={dl.enabled} onChange={() => updateDl({ enabled: !dl.enabled })} />
@@ -278,11 +283,47 @@ export default function Settings() {
               <>
                 <SettingsRow
                   label={dl.locked ? '解锁以拖动' : '锁定位置'}
-                  description={dl.locked ? '当前鼠标穿透，不挡桌面操作' : '可拖动歌词位置，点击锁定恢复穿透'}
+                  description={dl.locked ? '当前鼠标穿透。把鼠标移到歌词上，点出现的「解锁」；这里也可以解锁' : '悬停歌词可拖动、拉左右两边改宽度，A− A+ 改字号。锁定后鼠标穿透，移上去可以解锁'}
                 >
                   <button type="button" className="am-action am-action--subtle" onClick={() => updateDl({ locked: !dl.locked })}>
                     {dl.locked ? <LockOpen size={15} /> : <Lock size={15} />}
                     {dl.locked ? '解锁拖动' : '锁定'}
+                  </button>
+                </SettingsRow>
+                <SettingsRow label="字体" description="默认用中文字体显示汉字，英文用 Times New Roman">
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+                    <select
+                      className="settings-select"
+                      value={dl.style.fontFamily || 'Microsoft YaHei'}
+                      onChange={(event) => updateDl({ style: { fontFamily: event.target.value } })}
+                    >
+                      {!(systemFonts.chinese.includes(dl.style.fontFamily || 'Microsoft YaHei')) && (
+                        <option value={dl.style.fontFamily || 'Microsoft YaHei'}>{dl.style.fontFamily || 'Microsoft YaHei'}</option>
+                      )}
+                      {(systemFonts.chinese.length ? systemFonts.chinese : ['Microsoft YaHei', 'SimSun', 'SimHei', 'KaiTi']).map(name => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
+                    <button type="button" className="am-action am-action--subtle" onClick={() => setFontAdvanced(open => !open)}>
+                      高级设置
+                    </button>
+                    {fontAdvanced && (
+                      <select
+                        className="settings-select"
+                        aria-label="英文字体"
+                        value={dl.style.latinFontFamily || 'Times New Roman'}
+                        onChange={(event) => updateDl({ style: { latinFontFamily: event.target.value } })}
+                      >
+                        {(systemFonts.latin.length ? systemFonts.latin : ['Times New Roman', 'Segoe UI', 'Arial']).map(name => (
+                          <option key={name} value={name}>{name}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </SettingsRow>
+                <SettingsRow label="回到默认位置" description="歌词被拖到角落里找不到时，放回屏幕下方中间">
+                  <button type="button" className="am-action am-action--subtle" onClick={() => window.electronAPI?.desktopLyrics?.resetPosition?.()}>
+                    复位
                   </button>
                 </SettingsRow>
                 <SettingsRow label="字号">
@@ -335,12 +376,13 @@ export default function Settings() {
                   <span
                     style={{
                       fontSize: Math.min(dl.style.fontSize, 22),
-                      fontWeight: dl.style.bold ? 800 : 600,
+                      fontWeight: dl.style.bold ? 800 : 400,
                       color: dl.style.color,
-                      textShadow: dl.style.outline ? '0 0 2px rgba(0,0,0,.9), 0 0 2px rgba(0,0,0,.9)' : 'none',
-                      background: dl.style.showBg ? dl.style.bgColor : 'transparent',
-                      padding: dl.style.showBg ? '2px 10px' : 0,
-                      borderRadius: dl.style.showBg ? dl.style.bgRadius : 0,
+                      WebkitTextStroke: dl.style.outline ? `${dl.style.outlineWidth || 2}px ${dl.style.outlineColor}` : '0px transparent',
+                      paintOrder: 'stroke fill',
+                      background: dl.style.showBg ? dl.style.bgColor : 'linear-gradient(90deg, #f4f4f5 0 50%, transparent 50% 100%)',
+                      padding: '4px 12px',
+                      borderRadius: dl.style.showBg ? dl.style.bgRadius : 8,
                     }}
                   >
                     歌词预览 Sample
@@ -414,95 +456,6 @@ export default function Settings() {
                 版本发布页
               </button>
               {updateStatus && <span role="status">{updateStatus}</span>}
-            </div>
-          </SettingsGroup>
-        </div>
-
-        <div className="settings-column">
-          <SettingsGroup title="下载" icon={<Download size={20} />}>
-            <SettingsRow label="下载目录">
-              <div className="settings-path">
-                <span title={resolvedDownloadDir}>{resolvedDownloadDir || '默认下载目录'}</span>
-                <button
-                  type="button"
-                  onClick={() => void openDownloadsFolder().catch(error => showToast(friendlyDownloadError(error)))}
-                  title="在文件资源管理器中打开"
-                >
-                  <FolderOpen size={14} />
-                  打开目录
-                </button>
-                <button type="button" onClick={changeDownloadDir} title="更改下载目录">
-                  更改
-                </button>
-              </div>
-            </SettingsRow>
-            <SettingsRow label="下载格式">
-              <StyledSelect
-                value={settings.downloadFormat === 'm4a' ? 'M4A (原源格式)' : 'MP3 (推荐，兼容性强)'}
-                onChange={(value) => setAppSettings({ downloadFormat: value.startsWith('M4A') ? 'm4a' : 'mp3' })}
-                options={['MP3 (推荐，兼容性强)', 'M4A (原源格式)']}
-              />
-            </SettingsRow>
-            <p className="text-caption">MP3 以 320kbps 导出并写入歌名、歌手、专辑及可用封面；有损转码不会提升原音质。M4A 保留原始音频流。</p>
-          </SettingsGroup>
-
-          <SettingsGroup title="歌单云同步" icon={<Cloud size={20} />}>
-            <SettingsRow label="WebDAV 地址">
-              <input
-                className="settings-input"
-                type="url"
-                value={davUrl}
-                onChange={(e) => setDavUrl(e.target.value)}
-                placeholder="https://dav.jianguoyun.com/dav/"
-                autoComplete="off"
-                spellCheck={false}
-              />
-            </SettingsRow>
-            <SettingsRow label="账号">
-              <input
-                className="settings-input"
-                type="text"
-                value={davUser}
-                onChange={(e) => setDavUser(e.target.value)}
-                placeholder="WebDAV 账号"
-                autoComplete="off"
-                spellCheck={false}
-              />
-            </SettingsRow>
-            <SettingsRow label="密码" description="坚果云等建议使用应用专用密码">
-              <input
-                className="settings-input"
-                type="password"
-                value={davPass}
-                onChange={(e) => setDavPass(e.target.value)}
-                placeholder={davConfigured ? '已保存（修改请重新输入）' : '应用专用密码'}
-                autoComplete="off"
-              />
-            </SettingsRow>
-            <div className="settings-actions">
-              <button type="button" onClick={handleTestWebdav}>
-                <RefreshCw size={14} />
-                测试连接
-              </button>
-              <button type="button" onClick={handleSaveWebdav}>
-                保存配置
-              </button>
-            </div>
-            <div className="settings-actions is-divided">
-              <button type="button" className="is-primary" onClick={() => runSyncTask(runSync, '正在同步…')} disabled={!davConfigured || syncBusy}>
-                <RefreshCw size={14} />
-                立即同步
-              </button>
-              <button type="button" onClick={() => runSyncTask(forceUpload, '正在上传…')} disabled={!davConfigured || syncBusy}>
-                <CloudUpload size={14} />
-                上传到云端
-              </button>
-              <button type="button" onClick={() => runSyncTask(forceDownload, '正在下载…')} disabled={!davConfigured || syncBusy}>
-                <CloudDownload size={14} />
-                从云端下载
-              </button>
-              {syncMessage && <span>{syncMessage}</span>}
-              {lastSync && <span>上次同步：{new Date(lastSync).toLocaleString()}</span>}
             </div>
           </SettingsGroup>
         </div>

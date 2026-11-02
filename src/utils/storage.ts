@@ -8,6 +8,28 @@ const PLAYLIST_TOMBSTONES_KEY = 'bilimusic_playlists_deleted'
 const FAVORITE_TOMBSTONES_KEY = 'bilimusic_favorites_deleted'
 const SETTINGS_KEY = 'bilimusic_settings'
 export const PLAYLISTS_CHANGED_EVENT = 'bilimusic:playlists-changed'
+export const PLAYLIST_UNDO_EVENT = 'bilimusic:playlist-undo'
+
+type PlaylistUndo = { playlistId: string; trackIds: string[] }
+let playlistUndo: PlaylistUndo | null = null
+
+function rememberPlaylistUndo(playlistId: string, trackIds: string[]) {
+  if (trackIds.length === 0) return
+  playlistUndo = { playlistId, trackIds }
+  window.dispatchEvent(new Event(PLAYLIST_UNDO_EVENT))
+}
+
+export function playlistUndoCount(playlistId: string): number {
+  return playlistUndo?.playlistId === playlistId ? playlistUndo.trackIds.length : 0
+}
+
+export function undoPlaylistAdd(playlistId: string): Playlist | null {
+  if (!playlistUndo || playlistUndo.playlistId !== playlistId) return null
+  const ids = playlistUndo.trackIds
+  playlistUndo = null
+  window.dispatchEvent(new Event(PLAYLIST_UNDO_EVENT))
+  return removeTracksFromPlaylist(playlistId, ids)
+}
 export const FAVORITES_CHANGED_EVENT = 'bilimusic:favorites-changed'
 export const SETTINGS_CHANGED_EVENT = 'bilimusic:settings-changed'
 
@@ -19,6 +41,9 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   downloadFormat: 'mp3',
   autoPlay: true,
   showLyrics: true,
+  resumeOnLaunch: false,
+  smallWindowQuality: '480',
+  unavailableCheck: 'off',
 }
 
 function notifySettingsChanged() {
@@ -32,10 +57,18 @@ export function loadRecentTracks(): Track[] {
   } catch { return [] }
 }
 
+export const RECENT_CHANGED_EVENT = 'bilimusic:recent-changed'
+
 export function saveRecentTracks(tracks: Track[]) {
   try {
     localStorage.setItem(RECENT_KEY, JSON.stringify(tracks.slice(0, 50)))
+    window.dispatchEvent(new CustomEvent(RECENT_CHANGED_EVENT))
   } catch { /* ignore */ }
+}
+
+export function removeRecentTracks(ids: string[]) {
+  const drop = new Set(ids)
+  saveRecentTracks(loadRecentTracks().filter(track => !drop.has(track.id)))
 }
 
 export function addRecentTrack(track: Track) {
@@ -138,12 +171,20 @@ export function saveFavoriteTombstones(list: Tombstone[]): void {
   saveTombstones(FAVORITE_TOMBSTONES_KEY, list)
 }
 
+let playlistCacheRaw: string | null = null
+let playlistCache: Playlist[] = []
+
 export function loadPlaylists(): Playlist[] {
   try {
-    const raw = localStorage.getItem(PLAYLISTS_KEY)
-    return raw ? JSON.parse(raw) : []
+    const raw = localStorage.getItem(PLAYLISTS_KEY) || ''
+    if (raw === playlistCacheRaw) return playlistCache
+    playlistCacheRaw = raw
+    playlistCache = raw ? JSON.parse(raw) : []
+    return playlistCache
   } catch {
-    return []
+    playlistCacheRaw = null
+    playlistCache = []
+    return playlistCache
   }
 }
 
@@ -185,16 +226,49 @@ export function deletePlaylist(id: string): void {
   savePlaylists(loadPlaylists().filter(p => p.id !== id))
 }
 
+export function addTracksToPlaylist(playlistId: string, tracks: Track[]): { playlist: Playlist | null; added: number; skipped: number } {
+  const playlists = loadPlaylists()
+  let updatedPlaylist: Playlist | null = null
+  let added = 0
+  let skipped = 0
+  const updated = playlists.map((playlist) => {
+    if (playlist.id !== playlistId) return playlist
+    const seen = new Set(playlist.tracks.map(item => item.id))
+    const fresh: Track[] = []
+    for (const track of tracks) {
+      if (!track.id || seen.has(track.id)) {
+        skipped += 1
+        continue
+      }
+      seen.add(track.id)
+      fresh.push(track)
+      added += 1
+    }
+    const next = [...fresh, ...playlist.tracks]
+    updatedPlaylist = {
+      ...playlist,
+      coverUrl: playlist.coverUrl || next.find(item => item.coverUrl)?.coverUrl || '',
+      tracks: next,
+      updatedAt: new Date().toISOString(),
+    }
+    rememberPlaylistUndo(playlistId, fresh.map(track => track.id))
+    return updatedPlaylist
+  })
+  if (updatedPlaylist) savePlaylists(updated)
+  return { playlist: updatedPlaylist, added, skipped }
+}
+
 export function addTrackToPlaylist(playlistId: string, track: Track): Playlist | null {
   const playlists = loadPlaylists()
   let updatedPlaylist: Playlist | null = null
   const updated = playlists.map((playlist) => {
     if (playlist.id !== playlistId) return playlist
     const exists = playlist.tracks.some(t => t.id === track.id)
+    if (!exists && track.id) rememberPlaylistUndo(playlistId, [track.id])
     updatedPlaylist = {
       ...playlist,
       coverUrl: playlist.coverUrl || track.coverUrl,
-      tracks: exists ? playlist.tracks : [...playlist.tracks, track],
+      tracks: exists ? playlist.tracks : [track, ...playlist.tracks],
       updatedAt: new Date().toISOString(),
     }
     return updatedPlaylist
@@ -203,12 +277,47 @@ export function addTrackToPlaylist(playlistId: string, track: Track): Playlist |
   return updatedPlaylist
 }
 
+function normalizeSmallWindowQuality(value: unknown): AppSettings['smallWindowQuality'] | '' {
+  if (value === '1080' || value === '1080p' || value === 1080) return '1080'
+  if (value === '720' || value === '720p' || value === 720) return '720'
+  if (value === '480' || value === '480p' || value === 480) return '480'
+  return ''
+}
+
+function readDurableSmallWindowQuality(): AppSettings['smallWindowQuality'] | '' {
+  if (typeof window === 'undefined') return ''
+  try {
+    return normalizeSmallWindowQuality(window.electronAPI?.getSmallWindowQuality?.())
+  } catch {
+    return ''
+  }
+}
+
+function writeDurableSmallWindowQuality(value: AppSettings['smallWindowQuality']) {
+  if (typeof window === 'undefined') return
+  try {
+    window.electronAPI?.setSmallWindowQuality?.(value)
+  } catch {
+    // 主进程还没接上时，页面里的设置仍然在。
+  }
+}
+
 export function loadAppSettings(): AppSettings {
   try {
     const raw = readStoredItem(SETTINGS_KEY)
-    if (!raw) return DEFAULT_APP_SETTINGS
-    const saved = JSON.parse(raw)
-    return { ...DEFAULT_APP_SETTINGS, ...saved, downloadFormat: saved.downloadFormat === 'm4a' ? 'm4a' : 'mp3' }
+    const saved = raw ? JSON.parse(raw) : {}
+    const fromFile = readDurableSmallWindowQuality()
+    const fromPage = normalizeSmallWindowQuality(saved.smallWindowQuality)
+    const smallWindowQuality = fromFile || fromPage || '480'
+    if (!fromFile && fromPage) writeDurableSmallWindowQuality(smallWindowQuality)
+    const unavailableCheck = saved.unavailableCheck === 'launch' || saved.unavailableCheck === 'weekly' ? saved.unavailableCheck : 'off'
+    return {
+      ...DEFAULT_APP_SETTINGS,
+      ...saved,
+      downloadFormat: saved.downloadFormat === 'm4a' ? 'm4a' : 'mp3',
+      smallWindowQuality,
+      unavailableCheck,
+    }
   } catch {
     return DEFAULT_APP_SETTINGS
   }
@@ -216,7 +325,10 @@ export function loadAppSettings(): AppSettings {
 
 export function saveAppSettings(settings: AppSettings) {
   try {
-    writeStoredItem(SETTINGS_KEY, JSON.stringify(settings))
+    const smallWindowQuality = normalizeSmallWindowQuality(settings.smallWindowQuality) || '480'
+    const next = { ...settings, smallWindowQuality }
+    writeStoredItem(SETTINGS_KEY, JSON.stringify(next))
+    writeDurableSmallWindowQuality(smallWindowQuality)
     notifySettingsChanged()
   } catch {
     // ignore
@@ -292,6 +404,19 @@ export function importPlaylistsFromText(text: string): { imported: number; skipp
   }
 
   return { imported: imported.length, skipped }
+}
+
+export function removeTracksFromAllPlaylists(trackIds: string[]) {
+  const drop = new Set(trackIds)
+  if (drop.size === 0) return
+  let changed = false
+  const playlists = loadPlaylists().map(playlist => {
+    const tracks = playlist.tracks.filter(track => !drop.has(track.id))
+    if (tracks.length === playlist.tracks.length) return playlist
+    changed = true
+    return { ...playlist, tracks, updatedAt: new Date().toISOString() }
+  })
+  if (changed) savePlaylists(playlists)
 }
 
 export function removeTracksFromPlaylist(playlistId: string, trackIds: string[]): Playlist | null {

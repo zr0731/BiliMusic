@@ -43,6 +43,12 @@ export interface AppSettings {
   downloadDir: string
   autoPlay: boolean
   showLyrics: boolean
+  /** 打开软件时是否从上次的歌单和进度继续。默认关闭。 */
+  resumeOnLaunch: boolean
+  /** 小窗画面清晰度。默认 480p。 */
+  smallWindowQuality: '480' | '720' | '1080'
+  /** 失效曲目自动检查。默认不检查，手动按钮始终保留。 */
+  unavailableCheck: 'off' | 'launch' | 'weekly'
 }
 
 export type NavItem = {

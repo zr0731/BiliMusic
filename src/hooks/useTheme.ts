@@ -5,7 +5,31 @@ import { readStoredItem, writeStoredItem } from '@/utils/persistentStorage'
 const THEME_MODE_KEY = 'theme-mode'
 
 function getSystemTheme(): 'light' | 'dark' {
+  try {
+    if (window.electronAPI?.systemPrefersDark) return window.electronAPI.systemPrefersDark() ? 'dark' : 'light'
+  } catch {
+    // 主进程还没准备好时，退回浏览器的配色查询。
+  }
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+/** 整段运行期间都听系统配色。设置页没打开时也要能改回来。 */
+export function useSystemThemeBinding() {
+  useEffect(() => {
+    const apply = () => {
+      if (readStoredMode() === 'system') applyTheme('system')
+    }
+    apply()
+    const later = window.setTimeout(apply, 500)
+    const stopNative = window.electronAPI?.onSystemTheme?.(() => apply())
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    media.addEventListener('change', apply)
+    return () => {
+      window.clearTimeout(later)
+      stopNative?.()
+      media.removeEventListener('change', apply)
+    }
+  }, [])
 }
 
 function applyTheme(mode: ThemeMode) {

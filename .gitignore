@@ -8,6 +8,7 @@ release
 node_modules
 
 dev.log
+.cache/
 
 # 鸿蒙平台
 platform/HarmonyOS/node_modules

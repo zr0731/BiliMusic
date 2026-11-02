@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Disc3, Play, RefreshCw, TrendingUp } from 'lucide-react'
 import { usePlayer } from '@/contexts/PlayerContext'
 import { getMusicFeed, type VideoInfo } from '@/services/api'
+import { takeWarmDiscoverFeed } from '@/services/discoverWarm'
 import { markMusicFeedSeen, nextFeedSeed, seenTrackIds } from '@/services/recommendationSession'
 import type { Track } from '@/types'
 import {
@@ -53,7 +54,8 @@ export default function Discover() {
     setLoading(true)
     setError(null)
     try {
-      const data = await getMusicFeed({ mode: 'discover', seed: nextFeedSeed(), seenTrackIds, limit: 21 })
+      const warmed = batch === 0 ? takeWarmDiscoverFeed() : null
+      const data = await (warmed ?? getMusicFeed({ mode: 'discover', seed: nextFeedSeed(), seenTrackIds, limit: 21 }))
       if (request === requestId.current) { markMusicFeedSeen(data); setTracks(data) }
     } catch (e: unknown) {
       if (request === requestId.current) setError(e instanceof Error ? e.message : '加载失败')
@@ -86,7 +88,9 @@ export default function Discover() {
       <MusicHero
         eyebrow={sourceLabel}
         title="发现新声音"
-        subtitle="从 ACG、华语流行、摇滚、电音、古风等风格中发掘 1–10 分钟的歌曲，自动过滤非听歌内容。"
+        subtitle={loading && tracks.length === 0
+          ? '欢迎回来。精选推荐和各个风格正在同时查找，这一页先放在这里。'
+          : '从 ACG、华语流行、摇滚、电音、古风等风格中发掘 1–10 分钟的歌曲，自动过滤非听歌内容。'}
         image={heroImage}
         tone="pink"
         action={(

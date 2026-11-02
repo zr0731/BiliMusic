@@ -225,10 +225,10 @@ test('lyric bounds reach all four edges and remain visible on small/negative-ori
   const { clampLyricBounds } = load('electron/lyricGeometry.ts')
   for (const area of [{ x: 0, y: 0, width: 1920, height: 1040 }, { x: -800, y: -400, width: 800, height: 600 }]) {
     const left = clampLyricBounds(-9999, -9999, 900, 100, area)
-    assert.equal(left.x - area.x, 4)
-    assert.equal(left.y - area.y, 4)
+    assert.equal(left.x - area.x, 180 - 900)
+    assert.equal(left.y - area.y, 48 - 100)
     const right = clampLyricBounds(9999, 9999, 900, 100, area)
-    assert.equal(area.x + area.width - right.x - right.width, 4)
-    assert.equal(area.y + area.height - right.y - right.height, 4)
+    assert.equal(area.x + area.width - right.x, 180)
+    assert.equal(area.y + area.height - right.y, 48)
   }
 })

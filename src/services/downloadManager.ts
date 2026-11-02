@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { loadAppSettings } from '@/utils/storage'
 import { extractAudio } from '@/services/api'
+import { pageCidOf } from '@/services/biliBatchSource'
 import type { Track } from '@/types'
 
 export interface DownloadedTrack extends Track {
@@ -41,9 +42,20 @@ export function getDownloadedTracks(): DownloadedTrack[] {
 }
 export function saveDownloadedTracks(tracks: DownloadedTrack[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(tracks))
+  downloadedIdCache = ''
   window.dispatchEvent(new CustomEvent(EVENT_CHANGE))
 }
-export function isTrackDownloaded(id: string): boolean { return getDownloadedTracks().some(t => t.id === id) }
+let downloadedIdCache = ''
+let downloadedIds = new Set<string>()
+
+export function isTrackDownloaded(id: string): boolean {
+  const raw = localStorage.getItem(STORAGE_KEY) || ''
+  if (raw !== downloadedIdCache) {
+    downloadedIdCache = raw
+    downloadedIds = new Set(getDownloadedTracks().map(track => track.id))
+  }
+  return downloadedIds.has(id)
+}
 export function getDownloadedTrackPath(id: string) { return getDownloadedTracks().find(t => t.id === id)?.filePath }
 const directoryOf = (track: DownloadedTrack) => track.filePath?.replace(/[/\\][^/\\]+$/, '')
 export async function getLocalAudio(track: Track): Promise<string | null> {
@@ -91,7 +103,7 @@ export function downloadSingleTrack(track: Track, onProgress?: (message: string)
         }
         job.state = 'resolving'; publish(); onProgress?.('正在解析音频地址…')
         const fallback = track.aid && track.cid ? { aid: track.aid, cid: track.cid } : undefined
-        const source = await extractAudio(track.bvid || track.id, fallback)
+        const source = await extractAudio(track.bvid || track.id, fallback, pageCidOf(track))
         if (!source.audioUrl) throw new Error('未找到可用音频流')
         const filename = `${sanitizeFilename(track.title)} - ${sanitizeFilename(track.artist)}_${sanitizeFilename(track.id).slice(0, 28)}.${format}`
         const directory = settings.downloadDir?.trim() || undefined

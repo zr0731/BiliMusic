@@ -6,6 +6,8 @@
  */
 
 import type { Track } from '@/types'
+import { getVideoDetail } from '@/services/bilibiliApi'
+import { recallVideoDesc } from '@/services/videoWindowSource'
 
 export interface LyricLine {
   time: number
@@ -19,6 +21,8 @@ export interface LyricResult {
   trackName: string
   artistName: string
   sourceId: string
+  /** 加到播放进度上再对词。正数是提前，负数是延后。 */
+  offset?: number
 }
 
 export interface LyricCandidate {
@@ -132,6 +136,26 @@ function compactKeywordParts(raw: string): string[] {
   return out.filter(part => !NOISE.test(part))
 }
 
+export function likelySongName(title: string): string {
+  const raw = (title || '').normalize('NFKC')
+  const indexed = raw.match(/^\d+\s*[.．、]\s*[^-–—]+[-–—]\s*(.+)$/)
+  if (indexed?.[1]) {
+    const name = cleanSeg(indexed[1])
+    if (name) return name
+  }
+  const quoted = quotedTitles(raw)
+  if (quoted[0]) return quoted[0]
+  const segments = songSegments(raw)
+  if (!segments.length) return cleanTitle(raw)
+  return [...segments].sort((a, b) => b.length - a.length)[0]
+}
+
+function songSegments(raw: string): string[] {
+  return compactKeywordParts(raw)
+    .map(part => part.replace(/^\d+[.\s]*/, '').trim())
+    .filter(part => part.length >= 2 && !/^\d+$/.test(part) && !NOISE.test(part))
+}
+
 function queryCandidates(raw: string): string[] {
   const cands: string[] = []
   const quotes = quotedTitles(raw)
@@ -142,15 +166,13 @@ function queryCandidates(raw: string): string[] {
     if (context) uniqPush(cands, `${title} ${context}`)
   }
 
-  for (const part of compactKeywordParts(raw)) uniqPush(cands, part)
+  const segments = songSegments(raw).sort((a, b) => b.length - a.length)
+  for (const part of segments) uniqPush(cands, part)
   uniqPush(cands, cleanTitle(raw))
-
-  const compact = cleanTitle(raw).split(' ').filter(token => token.length > 1 && !NOISE.test(token))
-  for (const token of compact) uniqPush(cands, token)
 
   return cands
     .filter(candidate => !/^(av|bv)[\da-z]+$/i.test(candidate))
-    .slice(0, 8)
+    .slice(0, 6)
 }
 
 // ===== LRC 解析 =====
@@ -219,20 +241,22 @@ function normIncludes(haystack: string, needle: string): boolean {
   return n.length >= 2 && h.includes(n)
 }
 
-function scoreCandidate(c: LyricCandidate, ctx: { rawTitle: string; clean: string; duration: number; quoted: string[] }): number {
+function scoreCandidate(c: LyricCandidate, ctx: { rawTitle: string; clean: string; duration: number; quoted: string[]; credits: string[] }): number {
   const quotedScore = Math.max(0, ...ctx.quoted.map(q => dice(c.trackName, q)))
   let score = 0
   score += normIncludes(ctx.rawTitle, c.trackName) ? 360 : dice(c.trackName, ctx.clean) * 180
+  if (songSegments(ctx.rawTitle).some(part => norm(part) === norm(c.trackName))) score += 220
   score += normIncludes(ctx.rawTitle, c.artistName) ? 280 : 0
+  if (singerHints(ctx.rawTitle).some(hint => normIncludes(c.artistName, hint) || normIncludes(hint, c.artistName))) score += 160
+  if (ctx.credits.some(name => normIncludes(c.artistName, name) || normIncludes(name, c.artistName))) score += 140
   score += quotedScore * 300
   score += c.albumName && normIncludes(ctx.rawTitle, c.albumName) ? 40 : 0
 
   if (ctx.duration > 0 && c.duration > 0) {
     const diff = Math.abs(ctx.duration - c.duration)
-    if (diff <= 4) score += 130
-    else if (diff <= 10) score += 85
-    else if (diff <= 25) score += 35
-    else score -= Math.min(diff, 240) * 1.25
+    if (diff <= 4) score += 24
+    else if (diff <= 10) score += 8
+    else score -= Math.min(diff, 180) * 0.4
     if (ctx.duration > 900 && c.duration < 600) score -= 360
   }
 
@@ -245,11 +269,18 @@ async function searchBestCandidate(track: Track): Promise<LyricCandidate | null>
   const queries = queryCandidates(track.title)
   if (!queries.length) return null
 
+  const creditTask = loadCreditNames(track)
   const seen = new Map<string, LyricCandidate>()
-  for (const q of queries) {
-    const rows = await oiSearch(q, 10)
+  const add = (rows: LyricCandidate[]) => {
     for (const row of rows) if (!seen.has(row.id)) seen.set(row.id, row)
-    if (seen.size >= 24) break
+  }
+  add(await oiSearch(queries[0], 10))
+  if (seen.size < 24 && queries.length > 1) {
+    const rest = await Promise.all(queries.slice(1).map(query => oiSearch(query, 10)))
+    for (const rows of rest) {
+      add(rows)
+      if (seen.size >= 24) break
+    }
   }
 
   const ctx = {
@@ -257,20 +288,68 @@ async function searchBestCandidate(track: Track): Promise<LyricCandidate | null>
     clean: cleanTitle(track.title),
     duration: track.duration || 0,
     quoted: quotedTitles(track.title),
+    credits: await creditTask,
   }
 
-  const best = [...seen.values()]
+  const ranked = [...seen.values()]
     .map(candidate => ({ candidate, score: scoreCandidate(candidate, ctx) }))
-    .sort((a, b) => b.score - a.score)[0]
+    .sort((a, b) => b.score - a.score)
 
-  if (!best) return null
-  if (best.score < 120 && !normIncludes(track.title, best.candidate.trackName)) return null
-  return best.candidate
+  return ranked.find(item => lyricMatchAcceptable(item.candidate, ctx))?.candidate ?? null
+}
+
+function creditNames(desc: string): string[] {
+  const out: string[] = []
+  const text = desc.normalize('NFKC')
+  for (const match of text.matchAll(/(?:歌手|演唱者?|原唱|作词|作曲)\s*[:：]\s*([^\n]{1,40})/g)) {
+    for (const part of match[1].split(/[/|／、,，]/)) {
+      const name = part.replace(/翻唱|cover|原唱/gi, '').trim()
+      if (name.length >= 2 && name.length <= 24) uniqPush(out, name)
+    }
+  }
+  return out
+}
+
+async function loadCreditNames(track: Track): Promise<string[]> {
+  const bvid = track.bvid || ''
+  if (!/^BV/i.test(bvid)) return []
+  const cached = recallVideoDesc(bvid)
+  if (cached !== null) return creditNames(cached)
+  try {
+    const detail = await getVideoDetail(bvid)
+    return creditNames(detail.desc || '')
+  } catch {
+    return []
+  }
+}
+
+function singerHints(raw: string): string[] {
+  const out: string[] = []
+  for (const match of raw.normalize('NFKC').matchAll(/[【[(（]([^】\])）]+)[】\])）]/g)) {
+    const singer = match[1].split(/[/|／]/)[0].replace(/翻唱|cover|原唱/gi, '').trim()
+    if (singer.length >= 2 && singer.length <= 24) uniqPush(out, singer)
+  }
+  return out
+}
+
+function lyricMatchAcceptable(candidate: LyricCandidate, ctx: { rawTitle: string; clean: string; duration: number; quoted: string[]; credits: string[] }): boolean {
+  const quoted = Math.max(0, ...ctx.quoted.map(title => dice(candidate.trackName, title)), 0)
+  const similarity = Math.max(quoted, dice(candidate.trackName, ctx.clean), ...songSegments(ctx.rawTitle).map(part => dice(candidate.trackName, part)))
+  const nameInVideo = normIncludes(ctx.rawTitle, candidate.trackName) || quoted >= 0.72
+  const sameName = norm(candidate.trackName) === norm(ctx.clean) || ctx.quoted.some(title => norm(title) === norm(candidate.trackName)) || songSegments(ctx.rawTitle).some(part => norm(part) === norm(candidate.trackName))
+  // 歌名片段对上就留下。只靠时长接近仍然不能单独配上。
+  if (!nameInVideo && !sameName && similarity < 0.58) return false
+  if (ctx.duration > 0 && candidate.duration > 0 && !nameInVideo && !sameName) {
+    const diff = Math.abs(ctx.duration - candidate.duration)
+    if (diff > 180 && quoted < 0.8) return false
+  }
+  return true
 }
 
 function lyricToResult(candidate: LyricCandidate, content: string): LyricResult | null {
   const syncedLines = parseLrc(content)
-  const lines = syncedLines.length ? syncedLines : plainToLines(content)
+  const rawLines = syncedLines.length ? syncedLines : plainToLines(content)
+  const lines = rawLines.filter(line => !isCreditLine(line.text))
   if (!lines.length) return null
   return {
     lines,
@@ -287,9 +366,11 @@ function lyricToResult(candidate: LyricCandidate, content: string): LyricResult 
 const CACHE_KEY = 'bilimusic_lyrics_v2'
 const MISS_TTL = 24 * 60 * 60 * 1000
 
+const MATCHER_VERSION = 5
+
 type CacheEntry =
   | { status: 'ok'; result: LyricResult }
-  | { status: 'miss'; ts: number }
+  | { status: 'miss'; ts: number; version?: number }
 
 function readCache(): Record<string, CacheEntry> {
   try {
@@ -315,20 +396,22 @@ function cacheOk(trackId: string, result: LyricResult): void {
 
 function cacheMiss(trackId: string): void {
   const map = readCache()
-  map[trackId] = { status: 'miss', ts: Date.now() }
+  map[trackId] = { status: 'miss', ts: Date.now(), version: MATCHER_VERSION }
   writeCache(map)
 }
 
 export function clearLyricCache(trackId: string): void {
   const map = readCache()
+  if (!map[trackId]) return
   delete map[trackId]
   writeCache(map)
+  window.dispatchEvent(new CustomEvent(LYRIC_CHOSEN_EVENT, { detail: trackId }))
 }
 
 export async function getLyricForTrack(track: Track): Promise<LyricResult | null> {
   const entry = readCache()[track.id]
   if (entry?.status === 'ok') return entry.result
-  if (entry?.status === 'miss' && Date.now() - entry.ts < MISS_TTL) return null
+  if (entry?.status === 'miss' && entry.version === MATCHER_VERSION && Date.now() - entry.ts < MISS_TTL) return null
 
   const candidate = await searchBestCandidate(track)
   if (!candidate) { cacheMiss(track.id); return null }
@@ -341,15 +424,60 @@ export async function getLyricForTrack(track: Track): Promise<LyricResult | null
   return result
 }
 
+function isCreditLine(text: string): boolean {
+  const line = text.replace(/^\[[^\]]+\]/, '').trim()
+  if (!line) return true
+  if (/^歌曲\s*[:：]/.test(line)) return true
+  if (/(作词|作曲|编曲|词曲|和声编写|和声|音乐总监|总监|监制|编写|制作人|录音|混音|母带|吉他|贝斯|企划|策划|原唱|翻唱|写词|谱曲|编舞)\s*[:：]/.test(line)) return true
+  const parts = line.split(/[/／|]/).map(part => part.trim()).filter(Boolean)
+  if (parts.length >= 3 && parts.every(part => part.length <= 18) && !/[，。！？]/.test(line)) return true
+  if (/^.{1,32}\s*[-–—]\s*\S+[/／]/.test(line) && !/[，。！？]/.test(line)) return true
+  return false
+}
+
+export async function previewLyricLines(record: LyricCandidate, limit = 10): Promise<string[]> {
+  const content = await oiGetLyric(record.songId)
+  const synced = parseLrc(content)
+  const lines = (synced.length ? synced : plainToLines(content))
+    .map(line => line.text.trim())
+    .filter(text => text && !isCreditLine(text))
+  return lines.slice(0, limit)
+}
+
 export async function searchLyricCandidates(query: string): Promise<LyricCandidate[]> {
   const q = cleanTitle(query.trim())
   if (!q) return []
   return oiSearch(q, 20)
 }
 
-export async function chooseLyricCandidate(trackId: string, record: LyricCandidate): Promise<LyricResult | null> {
-  const content = await oiGetLyric(record.songId)
-  const result = lyricToResult(record, content)
-  if (result) cacheOk(trackId, result)
+export const LYRIC_CHOSEN_EVENT = 'bilimusic:lyric-chosen'
+
+export function saveLyricOffset(trackId: string, result: LyricResult) {
+  cacheOk(trackId, result)
+  window.dispatchEvent(new CustomEvent(LYRIC_CHOSEN_EVENT, { detail: trackId }))
+}
+
+/** 明确这首没有歌词。结果会记住，下次不会再硬配一首。 */
+export function saveNoLyric(trackId: string): LyricResult {
+  const result: LyricResult = {
+    lines: [],
+    synced: false,
+    instrumental: false,
+    trackName: '',
+    artistName: '',
+    sourceId: 'none',
+  }
+  cacheOk(trackId, result)
+  window.dispatchEvent(new CustomEvent(LYRIC_CHOSEN_EVENT, { detail: trackId }))
   return result
+}
+
+export async function chooseLyricCandidate(trackId: string, record: LyricCandidate): Promise<{ ok: true; result: LyricResult } | { ok: false; reason: string }> {
+  const content = await oiGetLyric(record.songId)
+  if (!content.trim()) return { ok: false, reason: '没有拿到这版歌词的正文。这是歌词接口没给内容，不是没点到' }
+  const result = lyricToResult(record, content)
+  if (!result) return { ok: false, reason: '接口有返回，但里面没有能唱的句子' }
+  cacheOk(trackId, result)
+  window.dispatchEvent(new CustomEvent(LYRIC_CHOSEN_EVENT, { detail: trackId }))
+  return { ok: true, result }
 }

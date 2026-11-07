@@ -167,6 +167,7 @@ export default function Favorites() {
               </ActionButton>
               <UnavailableCheckButton
                 tracks={tracks}
+                scopeKey="favorites"
                 scopeLabel="我喜欢"
                 onRemove={(ids) => setTracks(removeMultipleFavoriteTracks(ids))}
               />

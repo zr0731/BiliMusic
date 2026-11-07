@@ -35,6 +35,16 @@ test('natural end: repeat-one takes precedence, list loops with/without shuffle,
   assert.equal(trackEndAction('none', true, 1, 0), 'stop')
 })
 
+test('removing the current song continues with the next song and does not restart the list', () => {
+  const { trackAfterRemoval } = load('src/utils/playQueue.ts')
+  const songs = ['A', 'B', 'C'].map(id => ({ id }))
+  const allowed = new Set(['A', 'B'])
+  assert.equal(trackAfterRemoval(songs, allowed, 'C', false), null)
+  assert.equal(trackAfterRemoval(songs, allowed, 'C', true)?.id, 'A')
+  assert.equal(trackAfterRemoval(songs, new Set(['A', 'C']), 'B', false)?.id, 'C')
+  assert.equal(trackAfterRemoval(songs, new Set(['B', 'C']), 'A', false)?.id, 'B')
+})
+
 test('music cleaning enforces inclusive duration, title/description blacklist, category and weighting', () => {
   const { cleanMusicVideos, musicScore } = api()
   const list = [video('short', { duration: 59 }), video('long', { duration: 601 }), video('unknown', { duration: 0 }), video('bad', { desc: '这是一个乐理教学' }), video('review', { title: 'MV 解说' }), video('unrelated', { title: '今日美食' }), video('trailer', { title: 'Official Live Trailer' }), video('min', { duration: 60 }), video('max', { duration: 600 }), video('min'), video('seen')]

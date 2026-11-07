@@ -25,6 +25,21 @@ export function reconcileShuffle(previous: Track[], tracks: Track[], currentId?:
   return [...kept, ...shuffleArray(tracks.filter(track => !seen.has(track.id)))]
 }
 
+/**
+ * The song being played was removed. Continue with the next remaining song.
+ * Do not jump back to the first song unless the list is set to repeat.
+ */
+export function trackAfterRemoval(display: Track[], allowedIds: Set<string>, removedId: string, repeatAll: boolean): Track | null {
+  const index = display.findIndex(track => track.id === removedId)
+  if (index >= 0) {
+    for (let cursor = index + 1; cursor < display.length; cursor += 1) {
+      if (allowedIds.has(display[cursor].id)) return display[cursor]
+    }
+  }
+  if (!repeatAll) return null
+  return display.find(track => track.id !== removedId && allowedIds.has(track.id)) ?? null
+}
+
 /** Natural end differs from the user explicitly pressing Next. */
 export function trackEndAction(mode: 'none' | 'all' | 'one', autoPlay: boolean, length: number, index: number): 'stop' | 'replay' | number {
   if (mode === 'one') return 'replay'

@@ -55,6 +55,21 @@ export function classifyThrown(error: unknown): UnavailableVerdict {
 
 const DAY = 24 * 60 * 60 * 1000
 
+export function formatCheckedAt(at: number | null, now = Date.now()): string {
+  if (!at || !Number.isFinite(at)) return '还没检查过'
+  const date = new Date(at)
+  const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  const today = new Date(now)
+  today.setHours(0, 0, 0, 0)
+  const thatDay = new Date(at)
+  thatDay.setHours(0, 0, 0, 0)
+  const days = Math.round((today.getTime() - thatDay.getTime()) / (24 * 60 * 60 * 1000))
+  if (days === 0) return `今天 ${time}`
+  if (days === 1) return `昨天 ${time}`
+  if (date.getFullYear() === today.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${time}`
+}
+
 export function shouldRunUnavailableCheck(mode: UnavailableCheckMode, lastAt: number | null, now: number): boolean {
   if (mode === 'off') return false
   if (!lastAt || !Number.isFinite(lastAt)) return true
@@ -69,7 +84,7 @@ export function shouldRunUnavailableCheck(mode: UnavailableCheckMode, lastAt: nu
 export async function inspectAvailability(
   entries: Array<{ track: InspectableTrack; places: string[] }>,
   probe: (track: InspectableTrack) => Promise<'ok' | UnavailableVerdict>,
-  hooks: { concurrency?: number; isCancelled?: () => boolean; onProgress?: (done: number, total: number) => void } = {},
+  hooks: { concurrency?: number; gapMs?: number; isCancelled?: () => boolean; onProgress?: (done: number, total: number) => void } = {},
 ): Promise<{ gone: UnavailableItem[]; temporary: UnavailableItem[] } | null> {
   const unique: Array<{ track: InspectableTrack; places: string[] }> = []
   const indexById = new Map<string, number>()
@@ -97,6 +112,8 @@ export async function inspectAvailability(
       if (hooks.isCancelled?.()) return
       const entry = unique[cursor]
       cursor += 1
+      if (hooks.gapMs && hooks.gapMs > 0 && done > 0) await new Promise(resolve => setTimeout(resolve, hooks.gapMs))
+      if (hooks.isCancelled?.()) return
       const verdict = await probe(entry.track)
       done += 1
       hooks.onProgress?.(done, unique.length)

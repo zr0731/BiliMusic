@@ -52,6 +52,7 @@ export default function Recent() {
             </ActionButton>
             <UnavailableCheckButton
               tracks={tracks}
+              scopeKey="recent"
               scopeLabel="最近播放"
               className="am-action am-action--subtle"
               onRemove={(ids) => {

@@ -28,6 +28,9 @@ const biliApi = {
   videoDetail: (bvid) =>
     ipcRenderer.invoke('bili:videoDetail', bvid),
 
+  probeView: (bvid) =>
+    ipcRenderer.invoke('bili:probeView', bvid),
+
   playUrl: (bvid, cid) =>
     ipcRenderer.invoke('bili:playUrl', bvid, cid),
 

@@ -44,6 +44,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   resumeOnLaunch: false,
   smallWindowQuality: '480',
   unavailableCheck: 'off',
+  deleteDownloadWithTrack: false,
+  removeTrackFromAllPlaylists: false,
 }
 
 function notifySettingsChanged() {
@@ -221,8 +223,41 @@ export function updatePlaylist(updated: Playlist): void {
   savePlaylists(playlists.map(p => p.id === updated.id ? { ...updated, updatedAt: new Date().toISOString() } : p))
 }
 
+const PLAYLIST_HERO_KEY = 'bilimusic_playlist_heroes'
+export type PlaylistHeroTone = 'pink' | 'blue' | 'purple' | 'red'
+export interface PlaylistHeroChoice {
+  tone?: PlaylistHeroTone
+  image?: string
+}
+
+function readPlaylistHeroes(): Record<string, PlaylistHeroChoice> {
+  try {
+    const parsed = JSON.parse(readStoredItem(PLAYLIST_HERO_KEY) || '{}')
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+export function loadPlaylistHero(id: string): PlaylistHeroChoice | null {
+  const value = readPlaylistHeroes()[id]
+  if (!value || typeof value !== 'object') return null
+  const tone = value.tone === 'pink' || value.tone === 'blue' || value.tone === 'purple' || value.tone === 'red' ? value.tone : undefined
+  const image = typeof value.image === 'string' && value.image.startsWith('data:image/') ? value.image : undefined
+  if (!tone && !image) return null
+  return { tone, image }
+}
+
+export function savePlaylistHero(id: string, choice: PlaylistHeroChoice | null): void {
+  const all = readPlaylistHeroes()
+  if (!choice || (!choice.tone && !choice.image)) delete all[id]
+  else all[id] = { tone: choice.tone, image: choice.image }
+  writeStoredItem(PLAYLIST_HERO_KEY, JSON.stringify(all))
+}
+
 export function deletePlaylist(id: string): void {
   addTombstone(PLAYLIST_TOMBSTONES_KEY, id) // 记墓碑，避免同步后被对端复活
+  savePlaylistHero(id, null)
   savePlaylists(loadPlaylists().filter(p => p.id !== id))
 }
 
@@ -317,6 +352,8 @@ export function loadAppSettings(): AppSettings {
       downloadFormat: saved.downloadFormat === 'm4a' ? 'm4a' : 'mp3',
       smallWindowQuality,
       unavailableCheck,
+      deleteDownloadWithTrack: saved.deleteDownloadWithTrack === true,
+      removeTrackFromAllPlaylists: saved.removeTrackFromAllPlaylists === true,
     }
   } catch {
     return DEFAULT_APP_SETTINGS

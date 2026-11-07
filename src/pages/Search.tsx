@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowLeft, ChevronRight, Loader2, Music, Play, Search, Sparkles, UserRound, Users, Video, X } from 'lucide-react'
-import { useState, useCallback, useRef, useEffect, type ReactNode } from 'react'
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { usePlayer } from '@/contexts/PlayerContext'
 import TrackActions from '@/components/TrackActions'
@@ -17,6 +17,23 @@ import type { Track } from '@/types'
 type SearchType = 'video' | 'user'
 type SelectedUser = { mid: number; name: string; avatar: string }
 type SearchRouteState = { openArtist?: string }
+type SearchMemory = {
+  query: string
+  searchType: SearchType
+  resultType: SearchType
+  hasSearched: boolean
+  results: SearchItem[]
+  userResults: UserResult[]
+  selectedUser: SelectedUser | null
+  reachedEnd: boolean
+  totalResults: number
+  page: number
+  totalPages: number
+  currentQuery: string
+  scrollTop: number
+}
+
+let searchMemory: SearchMemory | null = null
 
 const pageMotion = {
   initial: { opacity: 0, y: 18 },
@@ -92,23 +109,23 @@ function searchItemToTrack(item: SearchItem): Track {
 
 export default function SearchPage() {
   const location = useLocation()
-  const [query, setQuery] = useState('')
-  const [searchType, setSearchType] = useState<SearchType>('video')
-  const [resultType, setResultType] = useState<SearchType>('video')
+  const [query, setQuery] = useState(() => searchMemory?.query ?? '')
+  const [searchType, setSearchType] = useState<SearchType>(() => searchMemory?.searchType ?? 'video')
+  const [resultType, setResultType] = useState<SearchType>(() => searchMemory?.resultType ?? 'video')
   const [isFocused, setIsFocused] = useState(false)
-  const [hasSearched, setHasSearched] = useState(false)
-  const [results, setResults] = useState<SearchItem[]>([])
-  const [userResults, setUserResults] = useState<UserResult[]>([])
-  const [selectedUser, setSelectedUser] = useState<SelectedUser | null>(null)
+  const [hasSearched, setHasSearched] = useState(() => searchMemory?.hasSearched ?? false)
+  const [results, setResults] = useState<SearchItem[]>(() => searchMemory?.results ?? [])
+  const [userResults, setUserResults] = useState<UserResult[]>(() => searchMemory?.userResults ?? [])
+  const [selectedUser, setSelectedUser] = useState<SelectedUser | null>(() => searchMemory?.selectedUser ?? null)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
-  const [reachedEnd, setReachedEnd] = useState(false)
-  const [totalResults, setTotalResults] = useState(0)
-  const pageRef = useRef(1)
-  const totalPagesRef = useRef(0)
-  const currentQueryRef = useRef('')
+  const [reachedEnd, setReachedEnd] = useState(() => searchMemory?.reachedEnd ?? false)
+  const [totalResults, setTotalResults] = useState(() => searchMemory?.totalResults ?? 0)
+  const pageRef = useRef(searchMemory?.page ?? 1)
+  const totalPagesRef = useRef(searchMemory?.totalPages ?? 0)
+  const currentQueryRef = useRef(searchMemory?.currentQuery ?? '')
   const searchGen = useRef(0)
   const videoPageCache = useRef(new Map<string, { items: SearchItem[]; totalResults: number; totalPages: number }>())
   const userPageCache = useRef(new Map<string, { items: UserResult[]; totalResults: number; totalPages: number }>())
@@ -116,6 +133,33 @@ export default function SearchPage() {
   const pageRootRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const loadingMoreRef = useRef(false)
+
+  useEffect(() => {
+    searchMemory = {
+      query,
+      searchType,
+      resultType,
+      hasSearched,
+      results,
+      userResults,
+      selectedUser,
+      reachedEnd,
+      totalResults,
+      page: pageRef.current,
+      totalPages: totalPagesRef.current,
+      currentQuery: currentQueryRef.current,
+      scrollTop: searchMemory?.scrollTop ?? 0,
+    }
+  }, [query, searchType, resultType, hasSearched, results, userResults, selectedUser, reachedEnd, totalResults])
+
+  useLayoutEffect(() => {
+    const scroller = document.querySelector('.app-content')
+    if (scroller instanceof HTMLElement && (searchMemory?.scrollTop ?? 0) > 0) scroller.scrollTop = searchMemory!.scrollTop
+    return () => {
+      const node = document.querySelector('.app-content')
+      if (searchMemory && node instanceof HTMLElement) searchMemory.scrollTop = node.scrollTop
+    }
+  }, [])
 
   const clearSearch = useCallback(() => {
     setQuery('')
@@ -130,6 +174,8 @@ export default function SearchPage() {
     pageRef.current = 1
     totalPagesRef.current = 0
     currentQueryRef.current = ''
+    if (searchMemory) searchMemory.scrollTop = 0
+    document.querySelector('.app-content')?.scrollTo({ top: 0 })
   }, [])
 
   const executeSearch = useCallback(async (keyword: string, type: SearchType) => {

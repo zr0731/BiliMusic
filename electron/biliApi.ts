@@ -31,6 +31,14 @@ export function registerBiliApiHandlers() {
     return fetchBiliApi(`/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`)
   })
 
+  // 失效检查只需要错误码。完整稿件详情很大，不能整份送进界面。
+  handle('bili:probeView', async (event, bvid: string) => {
+    assertTrustedSender(event)
+    if (typeof bvid !== 'string' || !/^BV[0-9A-Za-z]{10}$/.test(bvid)) throw new Error('无效的 BV 号')
+    const data = await fetchBiliResponse(`/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`)
+    return { code: Number(data?.code), message: typeof data?.message === 'string' ? data.message : '' }
+  })
+
   // 音频流地址
   handle('bili:playUrl', async (_event, bvid: string, cid: number) => {
     return fetchBiliApi(`/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&qn=0&fnver=0&fnval=16&fourk=1`)

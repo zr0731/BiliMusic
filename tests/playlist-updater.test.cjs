@@ -50,6 +50,7 @@ function detailHarness(initial) {
         hooks[i] = { deps, cleanup: fn() }
       })
     },
+    useLayoutEffect(fn, deps) { return react.useEffect(fn, deps) },
   }
   const notify = () => { for (const fn of listeners.get('changed') || []) fn() }
   const storage = {
@@ -58,6 +59,7 @@ function detailHarness(initial) {
     PLAYLISTS_CHANGED_EVENT: 'changed',
     PLAYLIST_UNDO_EVENT: 'undo',
     playlistUndoCount: () => 0,
+    loadPlaylistHero: () => null,
     removeTracksFromPlaylist: () => playlist,
     undoPlaylistAdd: () => playlist,
     deletePlaylist() { playlist = null; notify() },
@@ -75,6 +77,7 @@ function detailHarness(initial) {
     '@/components/AddToPlaylistButton': {},
     '@/components/PlaylistBatchAdd': {},
     '@/components/UnavailableTracks': { UnavailableCheckButton() { return null } },
+    '@/components/LocatePlaying': { LOCATE_PLAYING_EVENT: 'bilimusic:locate-playing', takeLocateRequest: () => false },
     '@/components/AppleMusicPage': {},
     '@/utils/storage': storage,
   }, '\nexport { PlaylistDetail }', { window })

@@ -1,7 +1,8 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Check, Music, X } from 'lucide-react'
+import { Check, Music, Plus, X } from 'lucide-react'
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { addTrackToPlaylist, loadPlaylists, PLAYLISTS_CHANGED_EVENT } from '@/utils/storage'
+import { usePlayer } from '@/contexts/PlayerContext'
+import { addTrackToPlaylist, createPlaylist, loadPlaylists, PLAYLISTS_CHANGED_EVENT, removeTracksFromPlaylist } from '@/utils/storage'
 import type { Playlist, Track } from '@/types'
 
 interface AddToPlaylistContextValue {
@@ -11,9 +12,12 @@ interface AddToPlaylistContextValue {
 const AddToPlaylistContext = createContext<AddToPlaylistContextValue | null>(null)
 
 export function AddToPlaylistProvider({ children }: { children: ReactNode }) {
+  const { showToast } = usePlayer()
   const [track, setTrack] = useState<Track | null>(null)
   const [playlists, setPlaylists] = useState<Playlist[]>(() => loadPlaylists())
-  const [addedId, setAddedId] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  const [naming, setNaming] = useState(false)
+  const [draft, setDraft] = useState('')
 
   useEffect(() => {
     const sync = () => setPlaylists(loadPlaylists())
@@ -27,21 +31,58 @@ export function AddToPlaylistProvider({ children }: { children: ReactNode }) {
 
   const close = useCallback(() => {
     setTrack(null)
-    setAddedId(null)
+    setSelected(new Set())
+    setNaming(false)
+    setDraft('')
   }, [])
 
   const openAddToPlaylist = useCallback((nextTrack: Track) => {
-    setPlaylists(loadPlaylists())
-    setAddedId(null)
+    const lists = loadPlaylists()
+    setPlaylists(lists)
+    setSelected(new Set(lists.filter(list => list.tracks.some(item => item.id === nextTrack.id)).map(list => list.id)))
+    setNaming(false)
+    setDraft('')
     setTrack(nextTrack)
   }, [])
 
-  const choose = useCallback((playlist: Playlist) => {
+  const toggle = useCallback((playlistId: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(playlistId)) next.delete(playlistId)
+      else next.add(playlistId)
+      return next
+    })
+  }, [])
+
+  const createNew = useCallback(() => {
+    const name = draft.trim()
+    if (!name || !track) return
+    const created = createPlaylist({ name, coverUrl: track.coverUrl })
+    setSelected(prev => new Set(prev).add(created.id))
+    setDraft('')
+    setNaming(false)
+  }, [draft, track])
+
+  const apply = useCallback(() => {
     if (!track) return
-    addTrackToPlaylist(playlist.id, track)
-    setAddedId(playlist.id)
-    setTimeout(close, 520)
-  }, [close, track])
+    let added = 0
+    let removed = 0
+    for (const playlist of loadPlaylists()) {
+      const has = playlist.tracks.some(item => item.id === track.id)
+      const want = selected.has(playlist.id)
+      if (want && !has) {
+        addTrackToPlaylist(playlist.id, track)
+        added += 1
+      } else if (!want && has) {
+        removeTracksFromPlaylist(playlist.id, [track.id])
+        removed += 1
+      }
+    }
+    if (added && removed) showToast(`已加入 ${added} 个歌单，并从 ${removed} 个歌单移出`)
+    else if (added) showToast(added === 1 ? '已加入 1 个歌单' : `已加入 ${added} 个歌单`)
+    else if (removed) showToast(removed === 1 ? '已从 1 个歌单移出' : `已从 ${removed} 个歌单移出`)
+    close()
+  }, [close, selected, showToast, track])
 
   return (
     <AddToPlaylistContext.Provider value={{ openAddToPlaylist }}>
@@ -82,22 +123,42 @@ export function AddToPlaylistProvider({ children }: { children: ReactNode }) {
                 </span>
               </div>
 
+              {naming ? (
+                <form className="add-playlist-create" onSubmit={(event) => { event.preventDefault(); createNew() }}>
+                  <input
+                    value={draft}
+                    onChange={(event) => setDraft(event.target.value)}
+                    placeholder="新歌单名称"
+                    aria-label="新歌单名称"
+                    autoFocus
+                  />
+                  <button type="submit" disabled={!draft.trim()}>创建</button>
+                </form>
+              ) : (
+                <button type="button" className="add-playlist-new" onClick={() => setNaming(true)}>
+                  <Plus size={16} />
+                  新建歌单
+                </button>
+              )}
+
               <div className="add-playlist-list">
                 {playlists.length === 0 ? (
-                  <div className="add-playlist-empty">还没有歌单，请先在侧边栏新建歌单。</div>
+                  <div className="add-playlist-empty">还没有歌单。先在上面新建一个。</div>
                 ) : playlists.map((playlist) => {
-                  const already = playlist.tracks.some(t => t.id === track.id)
-                  const justAdded = addedId === playlist.id
+                  const on = selected.has(playlist.id)
                   return (
-                    <button key={playlist.id} type="button" onClick={() => choose(playlist)}>
+                    <button key={playlist.id} type="button" className={on ? 'is-selected' : ''} onClick={() => toggle(playlist.id)}>
                       <span>
                         <strong>{playlist.name}</strong>
                         <small>{playlist.tracks.length} 首歌曲</small>
                       </span>
-                      {(already || justAdded) && <Check size={16} />}
+                      <span className={`add-playlist-check${on ? ' is-on' : ''}`}>{on && <Check size={14} />}</span>
                     </button>
                   )
                 })}
+              </div>
+              <div className="add-playlist-actions">
+                <button type="button" onClick={apply}>完成</button>
               </div>
             </motion.div>
           </motion.div>

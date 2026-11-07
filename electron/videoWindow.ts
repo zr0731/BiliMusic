@@ -5,7 +5,44 @@ import path from 'path'
 
 const WIDTH = 420
 const HEIGHT = 268
+const MIN_W = 280
+const MIN_H = 190
+const MINI_W = 136
+const MINI_H = 32
+const MAX_W = 10000
+const MAX_H = 10000
 const BOUNDS_NAME = 'video-window-bounds.json'
+
+function copyBounds(bounds: Electron.Rectangle): Electron.Rectangle {
+  return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+}
+
+function fitVideoBounds(current: Electron.Rectangle, next: Electron.Rectangle): Electron.Rectangle {
+  const ratio = 16 / 9
+  const bar = 32
+  const dw = Math.abs(next.width - current.width)
+  const dh = Math.abs(next.height - current.height)
+  let width = next.width
+  let height = next.height
+  if (dh > dw) {
+    height = Math.max(MIN_H, next.height)
+    width = Math.max(MIN_W, Math.round((height - bar) * ratio))
+    height = Math.round(width / ratio) + bar
+  } else {
+    width = Math.max(MIN_W, next.width)
+    height = Math.round(width / ratio) + bar
+    if (height < MIN_H) {
+      height = MIN_H
+      width = Math.max(MIN_W, Math.round((height - bar) * ratio))
+    }
+  }
+  return {
+    x: next.x !== current.x ? current.x + current.width - width : next.x,
+    y: next.y !== current.y ? current.y + current.height - height : next.y,
+    width,
+    height,
+  }
+}
 
 interface VideoWindowState {
   visible: boolean
@@ -15,6 +52,7 @@ interface VideoWindowState {
   time: number
   note: string
   quality: string
+  minimized: boolean
 }
 
 const emptyState = (): VideoWindowState => ({
@@ -25,6 +63,7 @@ const emptyState = (): VideoWindowState => ({
   time: 0,
   note: '',
   quality: '',
+  minimized: false,
 })
 
 function secureVideoHtml(html: string): string {
@@ -47,14 +86,22 @@ function videoHtml(): string {
   #bar.dragging { cursor: grabbing; }
   #title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
   #quality { flex: 0 0 auto; font-size: 11px; color: #ff8cab; }
-  #close, .jump { width: 22px; height: 22px; border: 0; border-radius: 6px; background: transparent; color: #f3f3f3; cursor: pointer; font-size: 14px; }
+  #close, #mini, .jump { width: 22px; height: 22px; border: 0; border-radius: 6px; background: transparent; color: #f3f3f3; cursor: pointer; font-size: 14px; }
+  #mini { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+  #mini svg { display: block; }
+  #restore { display: none; height: 22px; padding: 0 8px; border: 0; border-radius: 6px; background: #ff375f; color: #fff; font-size: 12px; cursor: pointer; }
+  body.mini video, body.mini #note { display: none; }
+  body.mini #bar { height: 100%; padding: 0 6px; }
+  body.mini .jump, body.mini #quality, body.mini #mini, body.mini #close { display: none; }
+  body.mini #restore { display: inline-flex; align-items: center; }
+  body.mini #title { font-size: 11px; }
   #note { position: absolute; left: 16px; right: 16px; top: 40%; margin: 0; text-align: center; color: #c8c8c8; font-size: 13px; }
 </style>
 </head>
 <body>
 <video id="video" muted playsinline preload="auto"></video>
 <p id="note" hidden></p>
-<div id="bar"><button id="prev" class="jump" type="button" aria-label="上一首">⏮</button><button id="pause" class="jump" type="button" aria-label="暂停">❚❚</button><button id="next" class="jump" type="button" aria-label="下一首">⏭</button><span id="title">小窗</span><span id="quality"></span><button id="close" type="button" aria-label="关闭小窗">×</button></div>
+<div id="bar"><button id="prev" class="jump" type="button" aria-label="上一首">⏮</button><button id="pause" class="jump" type="button" aria-label="暂停">❚❚</button><button id="next" class="jump" type="button" aria-label="下一首">⏭</button><span id="title">小窗</span><span id="quality"></span><button id="restore" type="button">还原</button><button id="mini" type="button" aria-label="最小化" title="最小化"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 11.5h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button><button id="close" type="button" aria-label="关闭小窗">×</button></div>
 <script>
   const ipc = window.auxiliaryIPC
   const video = document.getElementById('video')
@@ -168,7 +215,7 @@ function videoHtml(): string {
   function beginDrag(event) {
     if (event.button !== 0) return
     if (event.target.closest && event.target.closest('button')) return
-    const edge = 14
+    const edge = document.body.classList.contains('mini') ? 0 : 14
     if (event.clientX < edge || event.clientY < edge || event.clientX > window.innerWidth - edge || event.clientY > window.innerHeight - edge) return
     dragging = true
     pointerId = event.pointerId
@@ -182,6 +229,8 @@ function videoHtml(): string {
   window.addEventListener('pointermove', () => { if (dragging) ipc.send('video-window:drag:move') })
   window.addEventListener('pointerup', endDrag)
   window.addEventListener('pointercancel', endDrag)
+  document.getElementById('mini').addEventListener('click', () => ipc.send('video-window:minimize'))
+  document.getElementById('restore').addEventListener('click', () => ipc.send('video-window:restore'))
   document.getElementById('close').addEventListener('click', () => ipc.send('video-window:close'))
   let pictureReported = false
   video.addEventListener('error', () => {
@@ -195,7 +244,8 @@ function videoHtml(): string {
   video.addEventListener('playing', () => { pictureReported = false })
   ipc.on('video-window:state', (_error, state) => {
     if (!state) return
-    title.textContent = state.title || '小窗'
+    document.body.classList.toggle('mini', state.minimized === true)
+    title.textContent = state.minimized ? '小窗' : (state.title || '小窗')
     qualityLabel.textContent = state.quality || ''
     if (Number.isFinite(state.time)) {
       targetTime = Math.max(0, Number(state.time))
@@ -256,6 +306,14 @@ export function registerVideoWindow(options: { preload: string; mainWindow: () =
   let dragging = false
   let origin: { cursor: Electron.Point; bounds: Electron.Rectangle } | null = null
   let dragTimer: ReturnType<typeof setTimeout> | null = null
+  let minimized = false
+  let restoring = false
+  let fitting = false
+  let fitQueued = false
+  let pendingFit: Electron.Rectangle | null = null
+  let fullBounds: Electron.Rectangle | null = null
+  let lastStableBounds: Electron.Rectangle | null = null
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null
 
   const boundsFile = () => path.join(app.getPath('userData'), BOUNDS_NAME)
 
@@ -293,9 +351,10 @@ export function registerVideoWindow(options: { preload: string; mainWindow: () =
     videoWindow = new BrowserWindow({
       width: WIDTH,
       height: HEIGHT,
-      minWidth: 280,
-      minHeight: 190,
+      minWidth: MIN_W,
+      minHeight: MIN_H,
       show: false,
+      thickFrame: true,
       frame: false,
       resizable: true,
       minimizable: false,
@@ -313,14 +372,49 @@ export function registerVideoWindow(options: { preload: string; mainWindow: () =
       },
     })
     videoWindow.setAlwaysOnTop(true, 'floating')
-    videoWindow.setAspectRatio(16 / 9, { width: 0, height: 32 })
     videoWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     videoWindow.webContents.on('will-navigate', event => event.preventDefault())
+    videoWindow.on('will-resize', (event, newBounds) => {
+      if (fitting) return
+      if (restoring || minimized) {
+        event.preventDefault()
+        return
+      }
+      event.preventDefault()
+      if (!videoWindow || videoWindow.isDestroyed()) return
+      const win = videoWindow
+      pendingFit = fitVideoBounds(win.getBounds(), newBounds)
+      if (fitQueued) return
+      fitQueued = true
+      setImmediate(() => {
+        fitQueued = false
+        const next = pendingFit
+        pendingFit = null
+        if (!next || minimized || win.isDestroyed()) return
+        fitting = true
+        win.setBounds(next)
+        fitting = false
+      })
+    })
     videoWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(secureVideoHtml(videoHtml()))}`)
     videoWindow.once('ready-to-show', push)
-    videoWindow.on('moved', saveBounds)
-    videoWindow.on('resized', saveBounds)
-    videoWindow.on('closed', () => { videoWindow = null })
+    videoWindow.on('moved', () => { if (!minimized && !restoring) saveBounds() })
+    videoWindow.on('resized', () => {
+      if (!videoWindow || minimized || restoring) return
+      saveBounds()
+      const bounds = videoWindow.getBounds()
+      if (bounds.width >= MIN_W && bounds.height >= MIN_H) lastStableBounds = copyBounds(bounds)
+    })
+    videoWindow.on('closed', () => {
+      if (restoreTimer) clearTimeout(restoreTimer)
+      restoreTimer = null
+      videoWindow = null
+      minimized = false
+      restoring = false
+      fullBounds = null
+      lastStableBounds = null
+      state = { ...state, minimized: false }
+    })
     return videoWindow
   }
 
@@ -342,11 +436,96 @@ export function registerVideoWindow(options: { preload: string; mainWindow: () =
     dragging = false
     origin = null
     if (dragTimer) { clearTimeout(dragTimer); dragTimer = null }
-    if (videoWindow && !videoWindow.isDestroyed()) {
-      videoWindow.setResizable(true)
-      videoWindow.setAspectRatio(16 / 9, { width: 0, height: 32 })
+    if (videoWindow && !videoWindow.isDestroyed() && !minimized) saveBounds()
+  }
+
+  function applyFullChrome() {
+    if (!videoWindow || videoWindow.isDestroyed()) return
+    videoWindow.setResizable(true)
+    videoWindow.setMaximumSize(MAX_W, MAX_H)
+    videoWindow.setMinimumSize(MIN_W, MIN_H)
+  }
+
+  function rememberStable(bounds: Electron.Rectangle) {
+    if (bounds.width >= MIN_W && bounds.height >= MIN_H) lastStableBounds = copyBounds(bounds)
+  }
+
+  function snapshotFull(live: Electron.Rectangle): Electron.Rectangle {
+    if (live.width >= MIN_W && live.height >= MIN_H) return copyBounds(live)
+    if (lastStableBounds) return { x: live.x, y: live.y, width: lastStableBounds.width, height: lastStableBounds.height }
+    return { x: live.x, y: live.y, width: WIDTH, height: HEIGHT }
+  }
+
+  function cancelRestore() {
+    if (restoreTimer) clearTimeout(restoreTimer)
+    restoreTimer = null
+    restoring = false
+  }
+
+  function enterMini() {
+    if (!videoWindow || videoWindow.isDestroyed() || minimized) return
+    const live = videoWindow.getBounds()
+    const saved = snapshotFull(live)
+    endDrag()
+    cancelRestore()
+    fullBounds = saved
+    rememberStable(saved)
+    minimized = true
+    state = { ...state, minimized: true }
+    videoWindow.setMinimumSize(MINI_W, MINI_H)
+    videoWindow.setMaximumSize(MINI_W, MINI_H)
+    const next = clamp(saved.x, saved.y + saved.height - MINI_H, MINI_W, MINI_H)
+    videoWindow.setBounds(next)
+    push()
+  }
+
+  function leaveMini() {
+    if (!videoWindow || videoWindow.isDestroyed() || !minimized) return
+    endDrag()
+    const win = videoWindow
+    const current = win.getBounds()
+    const back = fullBounds ?? lastStableBounds
+    const target = clamp(back?.x ?? current.x, back?.y ?? current.y, back?.width ?? WIDTH, back?.height ?? HEIGHT)
+    minimized = false
+    restoring = true
+    state = { ...state, minimized: false }
+    win.setResizable(true)
+    win.setMaximumSize(MAX_W, MAX_H)
+    win.setMinimumSize(MINI_W, MINI_H)
+    win.setBounds(target)
+
+    const finish = (attempt: number) => {
+      restoreTimer = null
+      if (win.isDestroyed()) return
+      if (minimized) {
+        restoring = false
+        return
+      }
+      const now = win.getBounds()
+      const mismatch = now.width !== target.width || now.height !== target.height
+      if (mismatch && attempt < 8) {
+        win.setResizable(true)
+        win.setMaximumSize(MAX_W, MAX_H)
+        win.setMinimumSize(MINI_W, MINI_H)
+        win.setBounds(target)
+        restoreTimer = setTimeout(() => finish(attempt + 1), 40)
+        return
+      }
+      win.setResizable(true)
+      win.setMaximumSize(MAX_W, MAX_H)
+      win.setMinimumSize(MIN_W, MIN_H)
+      win.setBounds(target)
+      win.setSize(target.width, target.height)
+      if (process.platform === 'win32') {
+        win.setSize(target.width + 1, target.height)
+        win.setSize(target.width, target.height)
+      }
+      restoring = false
+      rememberStable(target)
+      saveBounds()
     }
-    saveBounds()
+    restoreTimer = setTimeout(() => finish(0), 0)
+    push()
   }
 
   function fromVideoWindow(event: IpcMainEvent): boolean {
@@ -369,7 +548,18 @@ export function registerVideoWindow(options: { preload: string; mainWindow: () =
     if (typeof patch.quality === 'string') state.quality = patch.quality.slice(0, 24)
     if (!state.visible) {
       endDrag()
+      if (minimized) {
+        minimized = false
+        state = { ...state, minimized: false }
+        fullBounds = null
+        applyFullChrome()
+        videoWindow?.setMaximumSize(10000, 10000)
+      }
       videoWindow?.hide()
+      return
+    }
+    if (minimized) {
+      push()
       return
     }
     show()
@@ -389,10 +579,24 @@ export function registerVideoWindow(options: { preload: string; mainWindow: () =
   })
   ipcMain.on('video-window:next', (event) => { if (fromVideoWindow(event)) sendCommand('next') })
 
+  ipcMain.on('video-window:minimize', (event) => {
+    if (!fromVideoWindow(event) || !state.visible) return
+    enterMini()
+  })
+
+  ipcMain.on('video-window:restore', (event) => {
+    if (!fromVideoWindow(event) || !state.visible) return
+    leaveMini()
+  })
+
   ipcMain.on('video-window:close', (event) => {
     if (!fromVideoWindow(event)) return
-    state = { ...state, visible: false }
+    state = { ...state, visible: false, minimized: false }
+    minimized = false
+    fullBounds = null
     endDrag()
+    applyFullChrome()
+    videoWindow?.setMaximumSize(10000, 10000)
     videoWindow?.hide()
     const main = options.mainWindow()
     if (main && !main.isDestroyed()) main.webContents.send('video-window:closed')
@@ -402,7 +606,6 @@ export function registerVideoWindow(options: { preload: string; mainWindow: () =
     if (!fromVideoWindow(event) || !videoWindow) return
     origin = { cursor: screen.getCursorScreenPoint(), bounds: videoWindow.getBounds() }
     dragging = true
-    videoWindow.setResizable(false)
     if (dragTimer) clearTimeout(dragTimer)
     dragTimer = setTimeout(endDrag, 1000)
   })

@@ -1,4 +1,4 @@
-import { shuffledFrom, reconcileShuffle, trackEndAction } from '@/utils/playQueue'
+import { shuffledFrom, reconcileShuffle, trackAfterRemoval, trackEndAction } from '@/utils/playQueue'
 import { createContext, memo, useContext, useState, useCallback, useMemo, useRef, useEffect, type ReactNode } from 'react'
 import type { Track, RepeatMode } from '@/types'
 import { extractAudio } from '@/services/api'
@@ -6,7 +6,30 @@ import { pageCidOf } from '@/services/biliBatchSource'
 import { getLocalAudio } from '@/services/downloadManager'
 import { fadeVolume, waitForMetadata, startPlayback, rememberPosition, savedPosition } from '@/services/playback'
 import { addRecentTrack, toggleFavoriteTrack, loadFavoriteTracks, loadAppSettings, loadPlaylists, getPlaylist, PLAYLISTS_CHANGED_EVENT } from '@/utils/storage'
+import { readStoredItem, writeStoredItem } from '@/utils/persistentStorage'
 import { useAppSettings } from '@/hooks/useAppSettings'
+
+const DESKTOP_LYRICS_KEY = 'bilimusic_desktop_lyrics'
+const VIDEO_WINDOW_KEY = 'bilimusic_video_window'
+const DESKTOP_LYRICS_CHANGED_EVENT = 'DESKTOP_LYRICS_CHANGED_EVENT'
+const VIDEO_WINDOW_CHANGED_EVENT = 'VIDEO_WINDOW_CHANGED_EVENT'
+
+function readEnabled(raw: string | null): boolean {
+  try { return JSON.parse(raw || '{}').enabled === true } catch { return false }
+}
+
+function toggleDesktopLyrics() {
+  let current: Record<string, unknown> = {}
+  try { current = JSON.parse(readStoredItem(DESKTOP_LYRICS_KEY) || '{}') } catch { current = {} }
+  writeStoredItem(DESKTOP_LYRICS_KEY, JSON.stringify({ ...current, enabled: current.enabled !== true }))
+  window.dispatchEvent(new CustomEvent(DESKTOP_LYRICS_CHANGED_EVENT))
+}
+
+function toggleVideoWindow() {
+  const enabled = !readEnabled(localStorage.getItem(VIDEO_WINDOW_KEY))
+  try { localStorage.setItem(VIDEO_WINDOW_KEY, JSON.stringify({ enabled })) } catch { /* ignore */ }
+  window.dispatchEvent(new CustomEvent(VIDEO_WINDOW_CHANGED_EVENT))
+}
 
 interface PlayerState {
   currentTrack: Track | null
@@ -18,6 +41,8 @@ interface PlayerState {
   playbackSource: 'local' | 'online' | null
   /** 列表播完或被清空。和卡顿提示分开，避免小窗只是停在最后一帧。 */
   playbackNotice: string
+  /** 当前队列是从哪个歌单开始播的。从搜索直接播放时可能没有。 */
+  sourcePlaylistId?: string
 }
 
 interface VolumeState {
@@ -172,6 +197,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [initialState] = useState(loadPersistedPlayerState)
   const restoredRef = useRef(initialState)
   const sourcePlaylistIdRef = useRef(initialState.sourcePlaylistId)
+  const [sourcePlaylistId, setSourcePlaylistId] = useState(initialState.sourcePlaylistId)
   const currentTrackRef = useRef<Track | null>(restoredRef.current.currentTrack)
   const persistEnabledRef = useRef(true)
   const [loadVersion, setLoadVersion] = useState(0)
@@ -183,6 +209,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [isMuted, setIsMuted] = useState(() => restoredRef.current.isMuted)
   const [repeatMode, setRepeatMode] = useState<RepeatMode>(() => restoredRef.current.repeatMode)
   const [isShuffled, setIsShuffled] = useState(() => restoredRef.current.isShuffled)
+  const repeatModeRef = useRef(repeatMode)
+  const isShuffledRef = useRef(isShuffled)
+  repeatModeRef.current = repeatMode
+  isShuffledRef.current = isShuffled
   const [queue, setQueue] = useState<Track[]>(() => restoredRef.current.queue)
   currentTrackRef.current = currentTrack
   const [loadingAudio, setLoadingAudio] = useState(false)
@@ -645,6 +675,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!tracks.some(item => item.id === track.id)) return
     setPlaybackNotice('')
     sourcePlaylistIdRef.current = playlistId
+    setSourcePlaylistId(playlistId)
     const favIds = new Set(loadFavoriteTracks().map(item => item.id))
     const unique = [...new Map(tracks.map(item => [item.id, item])).values()]
     const synced = unique.map(item => ({ ...item, isLiked: favIds.has(item.id) }))
@@ -693,25 +724,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (next.length === prev.length) return prev
         const playing = currentTrackRef.current
         if (playing && !allowed.has(playing.id)) {
-          const fallback = next[0]
+          const display = isShuffledRef.current && shuffledQueueRef.current.length ? shuffledQueueRef.current : prev
+          const picked = trackAfterRemoval(display, allowed, playing.id, repeatModeRef.current === 'all')
+          const successor = picked ? next.find(track => track.id === picked.id) ?? null : null
+          const wasPlaying = shouldAutoplayRef.current
           queueMicrotask(() => {
-            if (!fallback) {
+            if (!successor) {
               shouldAutoplayRef.current = false
               setCurrentTrack(null)
               setIsPlaying(false)
-              setPlaybackNotice('播放列表已经空了')
-              showToast('播放列表已经空了')
+              setProgress(0)
+              currentIndexRef.current = -1
+              const notice = next.length === 0 ? '播放列表已经空了' : '列表已播放完'
+              setPlaybackNotice(notice)
+              if (wasPlaying) showToast(notice)
               const audio = audioRef.current
               if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load() }
               return
             }
+            currentIndexRef.current = next.findIndex(track => track.id === successor.id)
             setPlaybackNotice('')
-            shouldAutoplayRef.current = true
-            currentIndexRef.current = 0
+            shouldAutoplayRef.current = wasPlaying
             setLoadVersion(version => version + 1)
-            setCurrentTrack(fallback)
+            setCurrentTrack(successor)
             setProgress(0)
-            setIsPlaying(true)
+            setIsPlaying(wasPlaying)
           })
         }
         return next
@@ -755,21 +792,41 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       isPlaying,
       queueLength: queue.length,
       theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark',
+      liked: Boolean(currentTrack?.isLiked),
+      lyricsOn: readEnabled(readStoredItem(DESKTOP_LYRICS_KEY)),
+      videoOn: readEnabled(localStorage.getItem(VIDEO_WINDOW_KEY)),
+      repeatMode,
     })
     pushTrayState()
     // 主题切换时重新推送，使托盘面板跟随浅色/深色
     const observer = new MutationObserver(pushTrayState)
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
-    return () => observer.disconnect()
-  }, [currentTrack?.artist, currentTrack?.coverUrl, currentTrack?.id, currentTrack?.title, isPlaying, queue.length])
+    window.addEventListener(DESKTOP_LYRICS_CHANGED_EVENT, pushTrayState)
+    window.addEventListener(VIDEO_WINDOW_CHANGED_EVENT, pushTrayState)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener(DESKTOP_LYRICS_CHANGED_EVENT, pushTrayState)
+      window.removeEventListener(VIDEO_WINDOW_CHANGED_EVENT, pushTrayState)
+    }
+  }, [currentTrack?.artist, currentTrack?.coverUrl, currentTrack?.id, currentTrack?.isLiked, currentTrack?.title, isPlaying, queue.length, repeatMode])
 
   useEffect(() => {
     return window.electronAPI?.onTrayPlayerCommand?.((command) => {
       if (command === 'toggle-play') togglePlay()
       if (command === 'next') next()
       if (command === 'prev') prev()
+      if (command === 'toggle-like') {
+        const id = currentTrackRef.current?.id
+        if (id) toggleLike(id)
+      }
+      if (command === 'cycle-repeat') {
+        const order: RepeatMode[] = ['none', 'all', 'one']
+        setRepeatMode(order[(order.indexOf(repeatModeRef.current) + 1) % order.length])
+      }
+      if (command === 'toggle-lyrics') toggleDesktopLyrics()
+      if (command === 'toggle-video') toggleVideoWindow()
     })
-  }, [next, prev, togglePlay])
+  }, [next, prev, toggleLike, togglePlay])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -870,6 +927,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     loadingAudio,
     playbackSource,
     playbackNotice,
+    sourcePlaylistId,
     play,
     pause,
     togglePlay,
@@ -891,7 +949,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     playFromQueue,
     showToast,
   }), [
-    currentTrack, isPlaying, repeatMode, isShuffled, queue, loadingAudio, playbackSource, playbackNotice,
+    currentTrack, isPlaying, repeatMode, isShuffled, queue, loadingAudio, playbackSource, playbackNotice, sourcePlaylistId,
     play, pause, togglePlay, next, prev, setRepeatMode, setIsShuffled,
     addToQueue, addTracksToQueue, removeFromQueue, removeMultipleFromQueue, moveInQueue,
     playNow, playFromList, playNext, clearQueue, toggleLike, playAll, playFromQueue, showToast,

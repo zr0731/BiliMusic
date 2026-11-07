@@ -27,6 +27,15 @@ test('a missing manuscript can be removed, a network failure cannot', () => {
   assert.equal(checker.classifyThrown({ code: -403 }).kind, 'temporary')
 })
 
+test('last check time reads as today, yesterday, or a date', () => {
+  const now = Date.parse('2026-11-06T20:27:00')
+  assert.equal(checker.formatCheckedAt(null, now), '还没检查过')
+  assert.equal(checker.formatCheckedAt(Date.parse('2026-11-06T18:05:00'), now), '今天 18:05')
+  assert.equal(checker.formatCheckedAt(Date.parse('2026-11-05T09:08:00'), now), '昨天 09:08')
+  assert.equal(checker.formatCheckedAt(Date.parse('2026-10-02T07:30:00'), now), '10月2日 07:30')
+  assert.equal(checker.formatCheckedAt(Date.parse('2025-12-31T23:15:00'), now), '2025年12月31日 23:15')
+})
+
 test('opening the app checks at most once per local day, weekly waits seven days', () => {
   const monday = Date.parse('2026-03-02T08:00:00')
   const later = Date.parse('2026-03-02T21:00:00')

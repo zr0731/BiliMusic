@@ -232,6 +232,12 @@ export default function Settings() {
             <SettingsRow label="自动播放" description="播放结束时自动播放推荐">
               <ToggleSwitch checked={settings.autoPlay} onChange={() => setAppSettings({ autoPlay: !settings.autoPlay })} />
             </SettingsRow>
+            <SettingsRow label="移出歌单时删除本地文件" description="关掉时，歌只从歌单里拿走，已经下载的文件还留着。打开后，移出的同时删掉对应的本地文件">
+              <ToggleSwitch checked={settings.deleteDownloadWithTrack} onChange={() => setAppSettings({ deleteDownloadWithTrack: !settings.deleteDownloadWithTrack })} />
+            </SettingsRow>
+            <SettingsRow label="移出歌单时从全部歌单移除" description="关掉时只影响当前这个歌单。打开后，其他歌单里的同一首歌也会一起移出">
+              <ToggleSwitch checked={settings.removeTrackFromAllPlaylists} onChange={() => setAppSettings({ removeTrackFromAllPlaylists: !settings.removeTrackFromAllPlaylists })} />
+            </SettingsRow>
             <SettingsRow label="歌词显示" description="播放页自动显示歌词">
               <ToggleSwitch checked={settings.showLyrics} onChange={() => setAppSettings({ showLyrics: !settings.showLyrics })} />
             </SettingsRow>

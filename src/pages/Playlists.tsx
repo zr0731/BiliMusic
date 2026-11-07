@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Check, CheckSquare, Download, ListMusic, Loader2, Music, Play, Square, Trash2, Undo2, X } from 'lucide-react'
+import { LOCATE_PLAYING_EVENT, takeLocateRequest } from '@/components/LocatePlaying'
 import { usePlayer } from '@/contexts/PlayerContext'
-import { downloadTracks, downloadSingleTrack, isTrackDownloaded } from '@/services/downloadManager'
+import { downloadTracks, downloadSingleTrack, isTrackDownloaded, removeDownloadedTrack } from '@/services/downloadManager'
 import AddToPlaylistButton from '@/components/AddToPlaylistButton'
 import PlaylistBatchAdd from '@/components/PlaylistBatchAdd'
 import {
@@ -17,17 +18,65 @@ import { UnavailableCheckButton } from '@/components/UnavailableTracks'
 import {
   deletePlaylist,
   getPlaylist,
+  loadAppSettings,
+  loadPlaylistHero,
   loadPlaylists,
+  savePlaylistHero,
   PLAYLIST_UNDO_EVENT,
   PLAYLISTS_CHANGED_EVENT,
   playlistUndoCount,
+  removeTracksFromAllPlaylists,
   removeTracksFromPlaylist,
   undoPlaylistAdd,
 } from '@/utils/storage'
+import type { PlaylistHeroChoice } from '@/utils/storage'
 import type { Playlist, Track } from '@/types'
 
 // Keep effect dependencies stable while a playlist is deleted or missing.
 const EMPTY_TRACKS: Track[] = []
+const HERO_TONES: Array<{ tone: NonNullable<PlaylistHeroChoice['tone']>; label: string; color: string }> = [
+  { tone: 'purple', label: '紫色', color: '#c084fc' },
+  { tone: 'blue', label: '蓝色', color: '#38bdf8' },
+  { tone: 'pink', label: '粉色', color: '#fb7185' },
+  { tone: 'red', label: '红色', color: '#f87171' },
+]
+
+function compressHeroImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      const maxEdge = 1280
+      const scale = Math.min(1, maxEdge / Math.max(img.width, img.height))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(img.width * scale))
+      canvas.height = Math.max(1, Math.round(img.height * scale))
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        reject(new Error('这张图片没法用作背景'))
+        return
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      let quality = 0.82
+      let data = canvas.toDataURL('image/jpeg', quality)
+      while (data.length > 350_000 && quality > 0.4) {
+        quality -= 0.15
+        data = canvas.toDataURL('image/jpeg', quality)
+      }
+      if (data.length > 700_000) {
+        reject(new Error('这张图片太大了，换一张小一点的'))
+        return
+      }
+      resolve(data)
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('这张图片没法打开'))
+    }
+    img.src = url
+  })
+}
 
 function usePlaylistWindow(count: number, enabled: boolean) {
   const ref = useRef<HTMLDivElement>(null)
@@ -216,6 +265,16 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
   selectedRef.current = selectedIds
   const windowed = shownTracks.length > 36
   const listWindow = usePlaylistWindow(shownTracks.length, windowed)
+  const [locateNonce, setLocateNonce] = useState(0)
+  const handledLocate = useRef(0)
+  const [heroChoice, setHeroChoice] = useState<PlaylistHeroChoice | null>(() => loadPlaylistHero(playlistId))
+  const [heroPicker, setHeroPicker] = useState(false)
+  const heroFileRef = useRef<HTMLInputElement>(null)
+
+  const requestLocate = () => {
+    setQuery('')
+    setLocateNonce(nonce => nonce + 1)
+  }
 
   const refreshDownloaded = useCallback(() => {
     const set = new Set<string>()
@@ -270,6 +329,62 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
     }
   }, [playlistId])
 
+  useLayoutEffect(() => {
+    const locating = takeLocateRequest(playlistId)
+    if (locating) {
+      requestLocate()
+      return
+    }
+    if (typeof document === 'undefined') return
+    const scroller = document.querySelector('.app-content')
+    if (scroller instanceof HTMLElement) scroller.scrollTop = 0
+  }, [playlistId])
+
+  useEffect(() => {
+    const onLocate = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== playlistId) return
+      requestLocate()
+    }
+    window.addEventListener(LOCATE_PLAYING_EVENT, onLocate)
+    return () => window.removeEventListener(LOCATE_PLAYING_EVENT, onLocate)
+  }, [playlistId])
+
+  useEffect(() => {
+    if (!heroPicker || typeof document === 'undefined') return
+    const close = (event: MouseEvent) => {
+      const target = event.target
+      if (target instanceof Element && target.closest('.am-hero__bg, .am-hero__picker')) return
+      setHeroPicker(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setHeroPicker(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [heroPicker])
+
+  useEffect(() => {
+    if (!locateNonce || handledLocate.current === locateNonce) return
+    handledLocate.current = locateNonce
+    const currentId = player.currentTrack?.id
+    const index = shownTracks.findIndex(track => track.id === currentId)
+    const scroller = document.querySelector('.app-content')
+    const list = listWindow.ref.current
+    if (index < 0 || !(scroller instanceof HTMLElement) || !list) return
+    const row = list.querySelector(`[data-playlist-index="${index}"]`)
+    if (row instanceof HTMLElement && !windowed) {
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      return
+    }
+    const listTop = list.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+    const top = listTop + index * listWindow.rowHeight - Math.max(0, (scroller.clientHeight - listWindow.rowHeight) / 2)
+    scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+  }, [locateNonce, shownTracks, player.currentTrack?.id, windowed, listWindow.ref, listWindow.rowHeight])
+
   useEffect(() => {
     const sync = () => setUndoCount(playlistUndoCount(playlistId))
     sync()
@@ -277,11 +392,39 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
     return () => window.removeEventListener(PLAYLIST_UNDO_EVENT, sync)
   }, [playlistId])
 
-  const heroImage = playlist?.coverUrl || tracks[0]?.coverUrl
+  const heroImage = heroChoice?.image || (heroChoice?.tone ? undefined : (playlist?.coverUrl || tracks[0]?.coverUrl))
+  const heroTone = heroChoice?.tone || 'purple'
   const updatedText = useMemo(() => {
     if (!playlist?.updatedAt) return ''
     return new Date(playlist.updatedAt).toLocaleDateString()
   }, [playlist?.updatedAt])
+
+  const applyHero = (choice: PlaylistHeroChoice | null) => {
+    savePlaylistHero(playlistId, choice)
+    setHeroChoice(choice && (choice.tone || choice.image) ? choice : null)
+    setHeroPicker(false)
+  }
+
+  const pickHeroFile = (file: File | undefined) => {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      showToast('请选择一张图片')
+      return
+    }
+    void compressHeroImage(file).then(image => {
+      applyHero({ tone: heroChoice?.tone, image })
+    }).catch(err => {
+      showToast(err instanceof Error ? err.message : '这张图片没法用作背景')
+    })
+  }
+
+  const onContextMenu = (event: React.MouseEvent) => {
+    if (!editing) return
+    const target = event.target
+    if (target instanceof Element && target.closest('input, textarea, button, a')) return
+    event.preventDefault()
+    setSelectedIds(new Set())
+  }
 
   const handleDelete = () => {
     if (!playlist) return
@@ -294,21 +437,34 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
     for (const id of ids) if (!stillKept.has(id)) clearLyricCache(id)
   }
 
+  const dropTracks = (ids: string[]) => {
+    if (!playlist || ids.length === 0) return null
+    const settings = loadAppSettings()
+    if (settings.removeTrackFromAllPlaylists) removeTracksFromAllPlaylists(ids)
+    else removeTracksFromPlaylist(playlist.id, ids)
+    forgetLyrics(ids)
+    const updated = getPlaylist(playlist.id)
+    setPlaylist(updated)
+    if (settings.deleteDownloadWithTrack) {
+      for (const id of ids) {
+        void removeDownloadedTrack(id).catch((error: { message?: string }) => {
+          showToast(`本地文件没删掉：${error?.message || '未知错误'}`)
+        })
+      }
+    }
+    return updated
+  }
+
   const removeSelected = () => {
     if (!playlist || selectedIds.size === 0) return
-    const ids = [...selectedIds]
-    const updated = removeTracksFromPlaylist(playlist.id, ids)
-    forgetLyrics(ids)
-    setPlaylist(updated)
+    dropTracks([...selectedIds])
     setSelectedIds(new Set())
     setEditing(false)
   }
 
   const removeOne = (trackId: string) => {
     if (!playlist) return
-    const updated = removeTracksFromPlaylist(playlist.id, [trackId])
-    forgetLyrics([trackId])
-    setPlaylist(updated)
+    dropTracks([trackId])
     setSelectedIds(prev => {
       const next = new Set(prev)
       next.delete(trackId)
@@ -368,28 +524,52 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
       }
       setSelectedIds(next)
     }
+    const indexAt = (clientY: number) => {
+      const list = listWindow.ref.current
+      const count = shownRef.current.length
+      if (!list || count === 0) return null
+      const raw = Math.floor((clientY - list.getBoundingClientRect().top) / listWindow.rowHeight)
+      return Math.min(count - 1, Math.max(0, raw))
+    }
+    const apply = (clientY: number) => {
+      const index = indexAt(clientY)
+      if (index == null || index === latest) return
+      latest = index
+      selectRange(index)
+    }
+    let pointerY = startY
+    let frame = 0
+    const scrollStep = () => {
+      frame = 0
+      const scroller = document.querySelector('.app-content')
+      if (!(scroller instanceof HTMLElement)) return
+      const rect = scroller.getBoundingClientRect()
+      const margin = 64
+      let delta = 0
+      if (pointerY < rect.top + margin) delta = -Math.max(8, Math.min(36, (rect.top + margin - pointerY) * 0.45))
+      else if (pointerY > rect.bottom - margin) delta = Math.max(8, Math.min(36, (pointerY - (rect.bottom - margin)) * 0.45))
+      if (delta === 0) return
+      const before = scroller.scrollTop
+      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+      scroller.scrollTop = Math.min(max, Math.max(0, before + delta))
+      if (scroller.scrollTop !== before) apply(pointerY)
+      frame = requestAnimationFrame(scrollStep)
+    }
     const move = (ev: PointerEvent) => {
       if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return
       if (!moved) {
         moved = true
         document.body.classList.add('playlist-selecting')
       }
-      const hit = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('[data-playlist-index]')
-      let index = Number(hit?.getAttribute('data-playlist-index'))
-      if (!Number.isInteger(index)) {
-        const list = listWindow.ref.current
-        const count = shownRef.current.length
-        if (!list || count === 0) return
-        index = Math.floor((ev.clientY - list.getBoundingClientRect().top) / listWindow.rowHeight)
-        if (index < 0 || index >= count) return
-      }
-      if (index === latest) return
-      latest = index
-      selectRange(index)
+      pointerY = ev.clientY
+      apply(ev.clientY)
+      if (!frame) frame = requestAnimationFrame(scrollStep)
     }
     const up = () => {
+      if (frame) cancelAnimationFrame(frame)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
       document.body.classList.remove('playlist-selecting')
       skipClickRef.current = true
       if (!moved) {
@@ -399,6 +579,7 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
   }, [])
 
   const visibleTracks = windowed ? shownTracks.slice(listWindow.start, listWindow.end) : shownTracks
@@ -429,13 +610,49 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
   }
 
   return (
-    <MusicPageShell>
+    <MusicPageShell onContextMenu={onContextMenu}>
       <MusicHero
         eyebrow="Playlist"
         title={playlist.name}
         subtitle={playlist.description || `${tracks.length} 首歌曲${updatedText ? ` · 更新于 ${updatedText}` : ''}`}
         image={heroImage}
-        tone="purple"
+        tone={heroTone}
+        photo={Boolean(heroChoice?.image)}
+        extra={(
+          <>
+            <button type="button" className="am-hero__bg" onClick={() => setHeroPicker(open => !open)}>
+              更换背景
+            </button>
+            {heroPicker && (
+              <div className="am-hero__picker">
+                <button type="button" onClick={() => heroFileRef.current?.click()}>选择图片</button>
+                <div className="am-hero__tones">
+                  {HERO_TONES.map(item => (
+                    <button
+                      key={item.tone}
+                      type="button"
+                      className={`am-hero__tone am-hero__tone--${item.tone}`}
+                      style={{ background: item.color }}
+                      aria-label={item.label}
+                      onClick={() => applyHero({ tone: item.tone })}
+                    />
+                  ))}
+                </div>
+                <button type="button" onClick={() => applyHero(null)}>恢复默认</button>
+                <input
+                  ref={heroFileRef}
+                  type="file"
+                  accept="image/*"
+                  hidden
+                  onChange={(event) => {
+                    pickHeroFile(event.target.files?.[0])
+                    event.target.value = ''
+                  }}
+                />
+              </div>
+            )}
+          </>
+        )}
         action={(
           <>
             {tracks.length > 0 && (
@@ -457,12 +674,9 @@ function PlaylistDetail({ playlistId }: { playlistId: string }) {
             {tracks.length > 0 && (
               <UnavailableCheckButton
                 tracks={tracks}
+                scopeKey={`playlist:${playlist.id}`}
                 scopeLabel="这个歌单"
-                onRemove={(ids) => {
-                  const updated = removeTracksFromPlaylist(playlist.id, ids)
-                  forgetLyrics(ids)
-                  setPlaylist(updated)
-                }}
+                onRemove={(ids) => { dropTracks(ids) }}
               />
             )}
             <button className="am-action am-action--subtle" onClick={handleDelete}>

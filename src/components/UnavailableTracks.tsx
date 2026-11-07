@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2 } from 'lucide-react'
 import { collectLibraryEntries, probeTrack, removeUnavailableFromLibrary } from '@/services/unavailableLibrary'
 import {
+  dismissCheckReport,
+  getCheckSnapshot,
+  startUnavailableCheck,
+  subscribeCheck,
+} from '@/services/unavailableCheckSession'
+import {
+  formatCheckedAt,
   inspectAvailability,
   shouldRunUnavailableCheck,
   type UnavailableItem,
@@ -87,80 +94,55 @@ function ReportRow({ item, showPlaces }: { item: UnavailableItem; showPlaces: bo
 
 export function UnavailableCheckButton({
   tracks,
+  scopeKey,
   scopeLabel,
   onRemove,
   className = 'am-action am-action--subtle',
 }: {
   tracks: Track[]
+  scopeKey: string
   scopeLabel: string
   onRemove: (ids: string[]) => void
   className?: string
 }) {
-  const [checking, setChecking] = useState(false)
-  const [progress, setProgress] = useState({ done: 0, total: 0 })
-  const [report, setReport] = useState<{ gone: UnavailableItem[]; temporary: UnavailableItem[] } | null>(null)
-  const [emptyNote, setEmptyNote] = useState('')
-  const runId = useRef(0)
-
-  useEffect(() => () => { runId.current += 1 }, [])
+  const snapshot = useSyncExternalStore(
+    (listener) => subscribeCheck(scopeKey, listener),
+    () => getCheckSnapshot(scopeKey),
+    () => getCheckSnapshot(scopeKey),
+  )
+  const checking = snapshot.phase === 'running'
+  const percent = snapshot.total > 0 ? Math.min(100, Math.round((snapshot.done / snapshot.total) * 100)) : 0
+  const checkedText = formatCheckedAt(snapshot.finishedAt)
+  const checkedTitle = snapshot.finishedAt ? new Date(snapshot.finishedAt).toLocaleString() : '还没有检查过'
 
   const start = () => {
     if (checking || tracks.length === 0) return
-    const id = ++runId.current
-    setChecking(true)
-    setEmptyNote('')
-    setProgress({ done: 0, total: tracks.length })
-    void inspectAvailability(
-      tracks.map(track => ({ track, places: [scopeLabel] })),
-      probeTrack,
-      {
-        isCancelled: () => runId.current !== id,
-        onProgress: (done, total) => { if (runId.current === id) setProgress({ done, total }) },
-      },
-    ).then(result => {
-      if (runId.current !== id) return
-      setChecking(false)
-      if (!result) return
-      if (result.gone.length === 0 && result.temporary.length === 0) {
-        setEmptyNote('没有失效曲目')
-        return
-      }
-      setReport(result)
-    }).catch(() => {
-      if (runId.current !== id) return
-      setChecking(false)
-      setReport({
-        gone: [],
-        temporary: tracks.filter(track => /^BV[0-9A-Za-z]{10}$/.test(track.bvid || '')).map(track => ({
-          id: track.id,
-          title: track.title,
-          artist: track.artist,
-          bvid: track.bvid,
-          reason: '网络失败',
-          places: [scopeLabel],
-        })),
-      })
-    })
+    startUnavailableCheck(scopeKey, tracks, scopeLabel)
   }
 
   return (
-    <>
-      <button type="button" className={className} onClick={start} disabled={checking || tracks.length === 0}>
+    <span className="unavailable-check">
+      <button type="button" className={className} onClick={start} disabled={checking || tracks.length === 0} title={checkedTitle}>
         {checking ? <Loader2 size={16} className="animate-spin" /> : null}
-        {checking ? `正在核对 ${progress.done}/${progress.total}` : '检查失效'}
+        {checking ? `正在核对 ${snapshot.done}/${snapshot.total}` : '检查失效'}
+        {checking && (
+          <span className="unavailable-check__meter" role="progressbar" aria-valuemin={0} aria-valuemax={snapshot.total} aria-valuenow={snapshot.done}>
+            <span style={{ width: `${percent}%` }} />
+          </span>
+        )}
       </button>
-      {emptyNote && <span className="unavailable-check-note">{emptyNote}</span>}
-      {report && (
+      <span className="unavailable-check-note" title={checkedTitle}>{snapshot.emptyNote || (snapshot.finishedAt ? `上次 ${checkedText}` : checkedText)}</span>
+      {snapshot.report && (
         <ReportDialog
           scopeLabel={scopeLabel}
           showPlaces={false}
-          gone={report.gone}
-          temporary={report.temporary}
-          onClose={() => setReport(null)}
+          gone={snapshot.report.gone}
+          temporary={snapshot.report.temporary}
+          onClose={() => dismissCheckReport(scopeKey)}
           onRemove={onRemove}
         />
       )}
-    </>
+    </span>
   )
 }
 

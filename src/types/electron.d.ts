@@ -4,6 +4,7 @@ interface BiliApi {
   onDownloadProgress: (callback: (data: { filename: string; received: number; total: number; percent: number | null; phase?: 'downloading' | 'transcoding' | 'completed' }) => void) => () => void
   search: (keyword: string, page?: number, pageSize?: number) => Promise<any>
   videoDetail: (bvid: string) => Promise<any>
+  probeView?: (bvid: string) => Promise<{ code: number; message: string }>
   playUrl: (bvid: string, cid: number) => Promise<any>
   nav: () => Promise<any>
   popular: (ps?: number, pn?: number) => Promise<any>
@@ -149,9 +150,13 @@ export interface TrayPlayerState {
   isPlaying: boolean
   queueLength: number
   theme: 'light' | 'dark'
+  liked?: boolean
+  lyricsOn?: boolean
+  videoOn?: boolean
+  repeatMode?: 'none' | 'one' | 'all'
 }
 
-export type TrayPlayerCommand = 'toggle-play' | 'next' | 'prev'
+export type TrayPlayerCommand = 'toggle-play' | 'next' | 'prev' | 'toggle-like' | 'toggle-lyrics' | 'toggle-video' | 'cycle-repeat'
 
 export interface WebdavConfigInput {
   url: string

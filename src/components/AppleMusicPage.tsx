@@ -3,10 +3,11 @@ import { Clock, Heart, Music, Play, Trash2 } from 'lucide-react'
 import TrackActions from '@/components/TrackActions'
 import type { Track } from '@/types'
 
-export function MusicPageShell({ children }: { children: React.ReactNode }) {
+export function MusicPageShell({ children, onContextMenu }: { children: React.ReactNode; onContextMenu?: (event: React.MouseEvent) => void }) {
   return (
     <motion.div
       className="am-page"
+      onContextMenu={onContextMenu}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.12, ease: [0.22, 1, 0.36, 1] }}
@@ -23,6 +24,8 @@ export function MusicHero({
   action,
   image,
   tone = 'pink',
+  photo = false,
+  extra,
 }: {
   eyebrow: string
   title: string
@@ -30,9 +33,11 @@ export function MusicHero({
   action?: React.ReactNode
   image?: string
   tone?: 'pink' | 'blue' | 'purple' | 'red'
+  photo?: boolean
+  extra?: React.ReactNode
 }) {
   return (
-    <section className={`am-hero am-hero--${tone}`}>
+    <section className={`am-hero am-hero--${tone} ${photo ? 'am-hero--photo' : ''}`}>
       {image && <div className="am-hero__image" style={{ backgroundImage: `url(${image})` }} />}
       <div className="am-hero__grain" />
       <div className="am-hero__blob am-hero__blob--a" />
@@ -43,6 +48,7 @@ export function MusicHero({
         <span>{subtitle}</span>
         {action && <div className="am-hero__action">{action}</div>}
       </div>
+      {extra}
     </section>
   )
 }

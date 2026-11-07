@@ -107,7 +107,9 @@ let pendingTrayShow: { x: number; y: number } | null = null
 let isQuitting = false
 let lyricWindow: BrowserWindow | null = null
 
-type TrayCommand = 'toggle-play' | 'next' | 'prev' | 'show-window' | 'quit'
+type TrayCommand = 'toggle-play' | 'next' | 'prev' | 'show-window' | 'quit' | 'toggle-like' | 'toggle-lyrics' | 'toggle-video' | 'cycle-repeat'
+const TRAY_MENU_WIDTH = 330
+const TRAY_MENU_HEIGHT = 500
 
 interface TrayPlayerState {
   hasTrack: boolean
@@ -117,6 +119,10 @@ interface TrayPlayerState {
   isPlaying: boolean
   queueLength: number
   theme: 'light' | 'dark'
+  liked: boolean
+  lyricsOn: boolean
+  videoOn: boolean
+  repeatMode: 'none' | 'one' | 'all'
 }
 
 let trayPlayerState: TrayPlayerState = {
@@ -127,6 +133,10 @@ let trayPlayerState: TrayPlayerState = {
   isPlaying: false,
   queueLength: 0,
   theme: 'dark',
+  liked: false,
+  lyricsOn: false,
+  videoOn: false,
+  repeatMode: 'none',
 }
 
 // 应用图标：dev 时从 electron 源目录加载，打包后从 dist-electron 同级加载（由 copy 脚本随构建复制）
@@ -231,8 +241,8 @@ function getTrayHtml() {
     }
     * { box-sizing: border-box; user-select: none; }
     body {
-      width: 330px;
-      height: 292px;
+      width: ${TRAY_MENU_WIDTH}px;
+      height: ${TRAY_MENU_HEIGHT}px;
       margin: 0;
       overflow: hidden;
       color: var(--tray-text);
@@ -337,8 +347,10 @@ function getTrayHtml() {
       background: transparent;
       color: var(--tray-row-text);
     }
+    .row { height: 36px; }
     .row:hover { background: var(--tray-row-hover); }
     .row.danger { color: #ff6961; }
+    .row:disabled { opacity: .42; }
     .count { color: var(--tray-count); font-size: 12px; }
   </style>
 </head>
@@ -358,6 +370,10 @@ function getTrayHtml() {
       <button id="next" title="下一首">⏭</button>
     </div>
     <div class="actions">
+      <button class="row" id="like"><span id="likeLabel">喜欢这首</span><span class="count" id="likeState"></span></button>
+      <button class="row" id="repeat"><span>循环播放</span><span class="count" id="repeatState">关</span></button>
+      <button class="row" id="lyrics"><span>桌面歌词</span><span class="count" id="lyricsState">关</span></button>
+      <button class="row" id="video"><span>小窗</span><span class="count" id="videoState">关</span></button>
       <button class="row" id="show"><span>显示 BiliMusic</span><span class="count" id="queue">0 首</span></button>
       <button class="row danger" id="quit"><span>退出应用</span><span>⌘Q</span></button>
     </div>
@@ -365,7 +381,7 @@ function getTrayHtml() {
   <script>
     const ipcRenderer = window.auxiliaryIPC
     const $ = (id) => document.getElementById(id)
-    let state = { hasTrack: false, title: '未在播放', artist: '搜索并播放音乐', coverUrl: '', isPlaying: false, queueLength: 0, theme: 'dark' }
+    let state = { hasTrack: false, title: '未在播放', artist: '搜索并播放音乐', coverUrl: '', isPlaying: false, queueLength: 0, theme: 'dark', liked: false, lyricsOn: false, videoOn: false, repeatMode: 'none' }
     function render(next) {
       state = next || state
       document.body.classList.toggle('light', (state.theme || 'dark') === 'light')
@@ -375,6 +391,12 @@ function getTrayHtml() {
       $('statusText').textContent = state.hasTrack ? (state.isPlaying ? '正在播放' : '已暂停') : '空闲'
       $('play').textContent = state.isPlaying ? '⏸' : '▶'
       $('queue').textContent = (state.queueLength || 0) + ' 首'
+      $('like').disabled = !state.hasTrack
+      $('likeLabel').textContent = state.liked ? '取消喜欢' : '喜欢这首'
+      $('likeState').textContent = state.liked ? '已喜欢' : ''
+      $('repeatState').textContent = state.repeatMode === 'one' ? '单曲' : state.repeatMode === 'all' ? '列表' : '关'
+      $('lyricsState').textContent = state.lyricsOn ? '开' : '关'
+      $('videoState').textContent = state.videoOn ? '开' : '关'
       $('prev').disabled = $('play').disabled = $('next').disabled = !state.hasTrack
       if (state.coverUrl) {
         $('cover').src = state.coverUrl
@@ -391,6 +413,10 @@ function getTrayHtml() {
     $('prev').onclick = () => ipcRenderer.send('tray:command', 'prev')
     $('play').onclick = () => ipcRenderer.send('tray:command', 'toggle-play')
     $('next').onclick = () => ipcRenderer.send('tray:command', 'next')
+    $('like').onclick = () => ipcRenderer.send('tray:command', 'toggle-like')
+    $('repeat').onclick = () => ipcRenderer.send('tray:command', 'cycle-repeat')
+    $('lyrics').onclick = () => ipcRenderer.send('tray:command', 'toggle-lyrics')
+    $('video').onclick = () => ipcRenderer.send('tray:command', 'toggle-video')
     $('show').onclick = () => ipcRenderer.send('tray:command', 'show-window')
     $('quit').onclick = () => ipcRenderer.send('tray:command', 'quit')
   </script>
@@ -410,8 +436,8 @@ function createTrayWindow() {
   if (trayWindow) return trayWindow
   trayWindowReady = false
   trayWindow = new BrowserWindow({
-    width: 330,
-    height: 292,
+    width: TRAY_MENU_WIDTH,
+    height: TRAY_MENU_HEIGHT,
     show: false,
     frame: false,
     resizable: false,
@@ -482,8 +508,8 @@ function toggleTrayWindow() {
 
   const bounds = tray.getBounds()
   const { workArea } = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y })
-  const width = 330
-  const height = 292
+  const width = TRAY_MENU_WIDTH
+  const height = TRAY_MENU_HEIGHT
   const x = Math.round(Math.min(Math.max(bounds.x + bounds.width / 2 - width / 2, workArea.x + 8), workArea.x + workArea.width - width - 8))
   const aboveY = bounds.y - height - 10
   const belowY = bounds.y + bounds.height + 10
@@ -1289,6 +1315,10 @@ ipcMain.on('tray:player-state', (_event, state: TrayPlayerState) => {
     isPlaying: Boolean(state?.isPlaying),
     queueLength: Number(state?.queueLength || 0),
     theme: state?.theme === 'light' ? 'light' : 'dark',
+    liked: state?.liked === true,
+    lyricsOn: state?.lyricsOn === true,
+    videoOn: state?.videoOn === true,
+    repeatMode: state?.repeatMode === 'one' || state?.repeatMode === 'all' ? state.repeatMode : 'none',
   }
   updateTrayState()
 })

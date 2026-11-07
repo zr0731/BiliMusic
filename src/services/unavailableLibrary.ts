@@ -1,5 +1,5 @@
 import { canPlayByAvidCid, getVideoDetail } from '@/services/bilibiliApi'
-import { classifyThrown, type InspectableTrack, type UnavailableVerdict } from '@/services/unavailableTracks'
+import { classifyThrown, classifyViewCode, type InspectableTrack, type UnavailableVerdict } from '@/services/unavailableTracks'
 import type { Track } from '@/types'
 import {
   loadFavoriteTracks,
@@ -30,6 +30,24 @@ export function collectLibraryEntries(): LibraryEntry[] {
 export async function probeTrack(track: InspectableTrack & { aid?: string | number; cid?: string | number }): Promise<'ok' | UnavailableVerdict> {
   const bvid = track.bvid?.trim() || ''
   if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) return 'ok'
+  const probeView = window.electronAPI?.biliApi?.probeView
+  if (probeView) {
+    try {
+      const result = await probeView(bvid)
+      if (!result || result.code === 0) return 'ok'
+      const verdict = classifyViewCode(result.code)
+      if (verdict.kind !== 'gone' || !track.aid || !track.cid) return verdict
+      try {
+        await canPlayByAvidCid(track.aid, track.cid)
+        return 'ok'
+      } catch (fallbackError) {
+        const fallback = classifyThrown(fallbackError)
+        return fallback.kind === 'temporary' ? fallback : verdict
+      }
+    } catch (error) {
+      return classifyThrown(error)
+    }
+  }
   try {
     await getVideoDetail(bvid)
     return 'ok'

@@ -49,6 +49,10 @@ export interface AppSettings {
   smallWindowQuality: '480' | '720' | '1080'
   /** 失效曲目自动检查。默认不检查，手动按钮始终保留。 */
   unavailableCheck: 'off' | 'launch' | 'weekly'
+  /** 从歌单移出时，同时删除已经下载的本地文件。默认不删。 */
+  deleteDownloadWithTrack: boolean
+  /** 从歌单移出时，其他歌单里的同一首也一起移出。默认只动当前歌单。 */
+  removeTrackFromAllPlaylists: boolean
 }
 
 export type NavItem = {
